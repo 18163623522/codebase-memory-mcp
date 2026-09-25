@@ -78,7 +78,7 @@ enum {
 #include "foundation/compat.h"
 #include "foundation/log.h"
 #include "foundation/compat_regex.h"
-#include "callable_sig.h" /* cbm_qn_callable_base_len: base-match tier */
+#include "callable_sig.h"        /* cbm_qn_callable_base_len: base-match tier */
 #include "foundation/mem_core.h" /* cbm_alloc: pattern buffers */
 #include "foundation/str_util.h"
 
