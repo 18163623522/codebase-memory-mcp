@@ -334,6 +334,47 @@ TEST(artifact_gitattributes_created) {
     PASS();
 }
 
+/* #1171: a repository (and a cache directory) under a non-ASCII path must
+ * export, report the artifact present, and import — also onto an existing
+ * cache db. On Windows the atomic writer used the ANSI CRT fopen + MoveFileExA
+ * and the existence check the ANSI stat, so CJK characters outside the active
+ * code page made every step fail. The bytes are escaped UTF-8 for a CJK repo
+ * directory name and a CJK cache directory name (kept ASCII in source). */
+#define ART_CJK_REPO "\xe6\x8c\x81\xe4\xb9\x85\xe5\x8c\x96\xe5\xa4\x8d\xe7\x8e\xb0"
+#define ART_CJK_CACHE "\xe5\xaf\xbc\xe5\x85\xa5"
+TEST(artifact_roundtrip_non_ascii_paths) {
+    setup_artifact_test();
+    create_test_db(g_db);
+
+    char repo[1024];
+    snprintf(repo, sizeof(repo), "%s/cbm-" ART_CJK_REPO, g_tmpdir);
+    ASSERT_TRUE(cbm_mkdir_p(repo, 0755));
+
+    ASSERT_EQ(cbm_artifact_export(g_db, repo, "test-proj", CBM_ARTIFACT_FAST), 0);
+    char zst[1024];
+    snprintf(zst, sizeof(zst), "%s/.codebase-memory/graph.db.zst", repo);
+    ASSERT_TRUE(cbm_file_exists(zst));
+    ASSERT_TRUE(cbm_artifact_exists(repo));
+
+    char cache_dir[1024];
+    snprintf(cache_dir, sizeof(cache_dir), "%s/" ART_CJK_CACHE, g_tmpdir);
+    ASSERT_TRUE(cbm_mkdir_p(cache_dir, 0755));
+    char import_db[1024];
+    snprintf(import_db, sizeof(import_db), "%s/imported.db", cache_dir);
+    ASSERT_EQ(cbm_artifact_import(repo, import_db), 0);
+    /* Re-import replaces the existing cache db (the second-session path). */
+    ASSERT_EQ(cbm_artifact_import(repo, import_db), 0);
+
+    cbm_store_t *s = cbm_store_open_path(import_db);
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(cbm_store_count_nodes(s, "test-proj"), 2);
+    ASSERT_EQ(cbm_store_count_edges(s, "test-proj"), 1);
+    cbm_store_close(s);
+
+    cleanup_dir(g_tmpdir);
+    PASS();
+}
+
 TEST(artifact_export_rename_failure_logs_specific_error) {
     setup_artifact_test();
     create_test_db(g_db);
@@ -1102,6 +1143,7 @@ SUITE(artifact) {
     RUN_TEST(artifact_schema_version_mismatch);
     RUN_TEST(artifact_import_missing);
     RUN_TEST(artifact_gitattributes_created);
+    RUN_TEST(artifact_roundtrip_non_ascii_paths);
     RUN_TEST(artifact_export_rename_failure_logs_specific_error);
     RUN_TEST(pipeline_persistence_export_failure_returns_error);
     RUN_TEST(artifact_import_rejects_size_mismatch);
