@@ -2126,19 +2126,25 @@ sys.exit(0 if ok else 1)
 fi
 echo "OK 8w-ii: Kiro MCP + steering + isolated exact-tool graph agent"
 
-# 8x: Hermes Agent YAML MCP mapping
+# 8x: Hermes Agent YAML MCP mapping. Native Windows Hermes keeps its home in
+# %LOCALAPPDATA%\hermes (#1180); the stub-only FAKE_HOME has no legacy ~/.hermes.
+if [[ "$BINARY" == *.exe ]]; then
+  HERMES_HOME_DIR="$FAKE_HOME/AppData/Local/hermes"
+else
+  HERMES_HOME_DIR="$FAKE_HOME/.hermes"
+fi
 HERMES_CMD=$(sed -n '/^  codebase-memory-mcp:/{n;s/^ *command: *//p;}' \
-  "$FAKE_HOME/.hermes/config.yaml" 2>/dev/null | head -1)
-if ! grep -q '^mcp_servers:' "$FAKE_HOME/.hermes/config.yaml" 2>/dev/null ||
-   ! grep -q '^  codebase-memory-mcp:' "$FAKE_HOME/.hermes/config.yaml" 2>/dev/null ||
+  "$HERMES_HOME_DIR/config.yaml" 2>/dev/null | head -1)
+if ! grep -q '^mcp_servers:' "$HERMES_HOME_DIR/config.yaml" 2>/dev/null ||
+   ! grep -q '^  codebase-memory-mcp:' "$HERMES_HOME_DIR/config.yaml" 2>/dev/null ||
    ! quoted_path_value_matches "$HERMES_CMD" "$SELF_PATH"; then
   echo "FAIL 8x: Hermes MCP mapping missing or malformed"
   exit 1
 fi
 echo "OK 8x: Hermes Agent MCP"
-if ! grep -q '^name: codebase-memory$' "$FAKE_HOME/.hermes/skills/codebase-memory/SKILL.md" 2>/dev/null ||
-   ! grep -q 'delegate_task' "$FAKE_HOME/.hermes/skills/codebase-memory/SKILL.md" 2>/dev/null ||
-   ! grep -q '`context`' "$FAKE_HOME/.hermes/skills/codebase-memory/SKILL.md" 2>/dev/null; then
+if ! grep -q '^name: codebase-memory$' "$HERMES_HOME_DIR/skills/codebase-memory/SKILL.md" 2>/dev/null ||
+   ! grep -q 'delegate_task' "$HERMES_HOME_DIR/skills/codebase-memory/SKILL.md" 2>/dev/null ||
+   ! grep -q '`context`' "$HERMES_HOME_DIR/skills/codebase-memory/SKILL.md" 2>/dev/null; then
   echo "FAIL 8x-i: Hermes delegation skill missing"
   exit 1
 fi
