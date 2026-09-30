@@ -345,6 +345,8 @@ echo "=== Step 0z: PR lane selector contract ==="
 bash "$ROOT/tests/test_select_lanes.sh"
 echo "=== Step 0z2: lane selector history replay ==="
 bash "$ROOT/scripts/test-impact/replay-selector.sh"
+echo "=== Step 0z3: lane-aware aggregate gates (ci-ok, shard union) ==="
+bash "$ROOT/tests/test_lane_gate_contract.sh"
 
 # Verify compiler supports target arch
 verify_compiler "$CC"
