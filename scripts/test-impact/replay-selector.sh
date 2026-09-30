@@ -17,7 +17,7 @@ set -euo pipefail
 
 case "${1:-}" in
 -h | --help)
-    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
 -*)

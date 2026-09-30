@@ -27,7 +27,7 @@
 # Exit: 0 = decided · 2 = usage error.
 set -euo pipefail
 
-usage() { sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; }
 
 FORMAT=json
 MODE="select"
