@@ -3,8 +3,9 @@
 # are selected at all.
 #
 #   1. dry-run.yml and release.yml pass no `lanes` (and no shard profile) to
-#      _test.yml / _lint.yml / _security.yml, whose inputs default to "all":
-#      those runs execute every job exactly as before lane selection.
+#      _test.yml / _lint.yml / _security.yml, whose inputs default to "all"
+#      (and "standard"): those runs execute every job, sharded, exactly as
+#      before lane selection. Only pr.yml asks for the PR shard profile.
 #   2. pr.yml feeds the selector's lanes to every reusable workflow, runs the
 #      docs-only contracts job, and hands ci-ok both the selection and the
 #      run's job list (actions: read) -- ci-ok needs `contracts` but never the
@@ -62,6 +63,9 @@ for caller in ("dry-run.yml", "release.yml"):
             require(not re.search(r"(?m)^\s+(lanes|shard_profile):", body),
                     f"{caller} job {job} passes a lane selection to {called.group(1)}; "
                     f"dry runs and releases must run every lane")
+m = re.search(r"(?ms)^      shard_profile:\n(.*?)(?=^      \S|^\S|\Z)", text("_test.yml"))
+require(m is not None and re.search(r"(?m)^        default: standard$", m.group(1)) is not None,
+        "_test.yml must declare a shard_profile input defaulting to standard")
 for callee in REUSABLE:
     src = text(callee)
     m = re.search(r"(?ms)^      lanes:\n(.*?)(?=^      \S|^\S|\Z)", src)
@@ -83,6 +87,8 @@ for key in ("tier", "full", "lanes"):
 for job in ("security", "lint", "test"):
     require("lanes: ${{ needs.changes.outputs.lanes }}" in pr.get(job, ""),
             f"pr.yml {job} must pass the selected lanes")
+require(re.search(r"(?m)^      shard_profile: pr$", pr.get("test", "")) is not None,
+        "pr.yml test must use the PR shard profile")
 require("scripts/test.sh --contracts-only" in pr.get("contracts", ""),
         "pr.yml contracts job must run scripts/test.sh --contracts-only")
 ci_ok = pr.get("ci-ok", "")

@@ -53,10 +53,12 @@ jobs:
       # Perf assertions are timing-sensitive on shared runners; they stay in
       # dry runs and releases where a flaky red does not block a merge.
       skip_perf: true
-      # Iteration speed: split each C-suite leg across parallel shard jobs
-      # (ubuntu x3, windows x2; coverage re-proven every run by the
-      # shard-completeness job). Dry runs and releases shard identically.
+      # Iteration speed: split C-suite legs across parallel shard jobs
+      # (coverage re-proven every run by the shard-completeness job). The PR
+      # profile shards only arm64 (x2); x86 and Windows run whole, since each
+      # shard re-pays its setup. Dry runs and releases keep x3 / x2.
       shard_suites: true
+      shard_profile: pr
 
   # ── Which lanes does this PR need? The changed files go through
   #    scripts/ci/select-lanes.sh (tier, lanes, full, reasons); docs / CI /

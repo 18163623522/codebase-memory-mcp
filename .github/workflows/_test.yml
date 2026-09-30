@@ -16,6 +16,10 @@ on:
         description: 'Split each C-suite leg across parallel shard jobs (ubuntu x3, windows x2); off = one job per leg, byte-identical to the pre-shard topology'
         type: boolean
         default: false
+      shard_profile:
+        description: 'Shard counts when shard_suites is on: standard = ubuntu x3, windows x2 (dry run, release); pr = ubuntu x86 x1, ubuntu arm64 x2, windows x1 (fewer jobs re-paying setup)'
+        type: string
+        default: standard
       lanes:
         description: 'PR lane selection (scripts/ci/select-lanes.sh JSON list): only those legs and jobs run; "all" = every one (dry run, release)'
         type: string
@@ -44,6 +48,7 @@ jobs:
         env:
           BROAD: ${{ inputs.broad_platforms }}
           SHARDS: ${{ inputs.shard_suites }}
+          SHARD_PROFILE: ${{ inputs.shard_profile }}
           LANES: ${{ inputs.lanes }}
         run: |
           # Every CORE leg is tagged with the lane (scripts/ci/select-lanes.sh)
@@ -113,14 +118,24 @@ jobs:
           # shards); Windows gets 2 (every extra shard re-pays ~5 min of
           # MSYS2 setup); macOS stays at 1 — mac legs are not the critical
           # path and mac runner concurrency ceilings are the tightest.
+          # The pr profile shards less: a PR runs few legs and every shard
+          # re-pays its setup, so x86 and Windows run whole and only arm64,
+          # the slowest leg (~72 min unsharded), splits in two.
+          case "$SHARD_PROFILE" in
+            standard) N_X86=3; N_ARM=3; N_WIN=2 ;;
+            pr) N_X86=1; N_ARM=2; N_WIN=1 ;;
+            *) echo "::error::unknown shard_profile '$SHARD_PROFILE'"; exit 1 ;;
+          esac
           if [ "$SHARDS" = "true" ]; then
-            UNIX=$(jq -c '[.[] | . as $e
-              | (if ($e.os | startswith("ubuntu")) then 3 else 1 end) as $n
+            UNIX=$(jq -c --argjson x86 "$N_X86" --argjson arm "$N_ARM" '[.[] | . as $e
+              | (if ($e.os | startswith("ubuntu")) then
+                   (if ($e.os | endswith("-arm")) then $arm else $x86 end)
+                 else 1 end) as $n
               | range(1; $n + 1) as $i
               | $e + {shard: "\($i)/\($n)"}]' <<< "$UNIX")
-            WIN=$(jq -c '[.[] | . as $e
-              | range(1; 3) as $i
-              | $e + {shard: "\($i)/2"}]' <<< "$WIN")
+            WIN=$(jq -c --argjson n "$N_WIN" '[.[] | . as $e
+              | range(1; $n + 1) as $i
+              | $e + {shard: "\($i)/\($n)"}]' <<< "$WIN")
           fi
           echo "unix={\"include\":$UNIX}" >> "$GITHUB_OUTPUT"
           echo "windows={\"include\":$WIN}" >> "$GITHUB_OUTPUT"
