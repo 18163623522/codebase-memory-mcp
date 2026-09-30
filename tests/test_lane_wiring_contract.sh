@@ -8,7 +8,7 @@
 #   2. pr.yml feeds the selector's lanes to every reusable workflow, runs the
 #      docs-only contracts job, and hands ci-ok both the selection and the
 #      run's job list (actions: read) -- ci-ok needs `contracts` but never the
-#      report-only memwaste / shadow jobs.
+#      report-only memwaste / shadow jobs, and the shadow is continue-on-error.
 #   3. every lane of scripts/ci/select-lanes.sh --list-lanes is served by a
 #      job: matrix lanes as a "lane":"<name>" tag in the leg data (the tag
 #      ci-ok reads back from the job name), single lanes by an `if:` that
@@ -98,6 +98,11 @@ for needle, why in (("LANES: ${{ needs.changes.outputs.lanes }}", "the selection
                     ("jobs?filter=latest", "the latest attempt of every job"),
                     ("scripts/ci/require-all-green.sh", "the canonical gate")):
     require(needle in ci_ok, f"ci-ok must use {why} ({needle})")
+shadow = pr.get("test-impact-shadow", "")
+require("scripts/ci/test-impact-shadow.sh --binary" in shadow
+        and re.search(r"(?m)^    continue-on-error: true$", shadow) is not None,
+        "pr.yml test-impact-shadow must exist, run the canonical script and be "
+        "continue-on-error (report-only)")
 test_wf = jobs(text("_test.yml"))
 require('--lanes "$LANES"' in test_wf.get("shard-completeness", ""),
         "shard-completeness must pass the selection to verify-shard-union.sh")

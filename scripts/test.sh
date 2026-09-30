@@ -360,6 +360,8 @@ echo "=== Step 0z3: lane-aware aggregate gates (ci-ok, shard union) ==="
 bash "$ROOT/tests/test_lane_gate_contract.sh"
 echo "=== Step 0z4: lane wiring (PRs select, dry run and release run all) ==="
 bash "$ROOT/tests/test_lane_wiring_contract.sh"
+echo "=== Step 0z5: test-impact shadow prediction contract ==="
+bash "$ROOT/tests/test_test_impact_predict.sh"
 
 if [ "$CONTRACTS_ONLY" -eq 1 ]; then
     echo "=== test.sh: contracts-only — every contract step passed ==="

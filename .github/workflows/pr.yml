@@ -212,6 +212,49 @@ jobs:
     with:
       mode: pr
 
+  # ── Test-impact SHADOW, REPORT-ONLY: predicts from the code graph which C
+  #    suites this change can affect (the latest released binary indexes the
+  #    PR checkout; detect_changes at depth 15 against the base, mapped to
+  #    suites, with the selector's run-all triggers) and uploads the
+  #    prediction, so graph-based selection can be judged against what really
+  #    failed before anything gates on it. continue-on-error and NOT in
+  #    ci-ok's needs: it can never block or pass a merge. ──
+  test-impact-shadow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The PR merge commit and its base parent: the diff to predict for.
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Fetch the latest released binary
+        id: release
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/ci/test-impact-shadow.sh --fetch-release "$RUNNER_TEMP/cbm-bin"
+      - name: Build the binary from this checkout (download failed)
+        if: ${{ steps.release.outcome == 'failure' }}
+        run: |
+          sudo apt-get update && sudo apt-get install -y zlib1g-dev
+          scripts/build.sh CC=gcc CXX=g++
+          mkdir -p "$RUNNER_TEMP/cbm-bin"
+          cp build/c/codebase-memory-mcp "$RUNNER_TEMP/cbm-bin/"
+      - name: Predict the impacted suites
+        run: scripts/ci/test-impact-shadow.sh --binary "$RUNNER_TEMP/cbm-bin/codebase-memory-mcp" --out "$RUNNER_TEMP/test-impact"
+      - name: Upload the prediction
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-impact-prediction
+          path: |
+            ${{ runner.temp }}/test-impact/prediction.json
+            ${{ runner.temp }}/test-impact/selection.json
+            ${{ runner.temp }}/test-impact/changed-files.txt
+          if-no-files-found: warn
+
   # ── Docs-only PRs (tier T0a) select no test leg, so this runs the static
   #    contract steps of the canonical test leg on their own (they police
   #    docs surfaces too: language counts, version metadata). Every test leg
