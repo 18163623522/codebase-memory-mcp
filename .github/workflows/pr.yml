@@ -261,10 +261,10 @@ jobs:
             ${{ runner.temp }}/test-impact/changed-files.txt
           if-no-files-found: warn
 
-  # ── Docs-only PRs (tier T0a) select no test leg, so this runs the static
-  #    contract steps of the canonical test leg on their own (they police
-  #    docs surfaces too: language counts, version metadata). Every test leg
-  #    runs the same steps, so the job exists only when no leg does. ──
+  # ── Docs-only and non-product PRs (tiers T0a, T0b) run the static contract
+  #    steps of the canonical test leg on their own: they police docs
+  #    surfaces (language counts, version metadata), test-infrastructure/ and
+  #    lint config too. Every test leg runs the same steps. ──
   contracts:
     needs: [changes]
     if: ${{ !cancelled() && needs.changes.result == 'success' && contains(fromJSON(needs.changes.outputs.lanes), 'contracts') }}

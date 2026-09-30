@@ -7,7 +7,7 @@
 #      (and "standard"): those runs execute every job, sharded, exactly as
 #      before lane selection. Only pr.yml asks for the PR shard profile.
 #   2. pr.yml feeds the selector's lanes to every reusable workflow, runs the
-#      docs-only contracts job, and hands ci-ok both the selection and the
+#      T0a/T0b contracts job, and hands ci-ok both the selection and the
 #      run's job list (actions: read) -- ci-ok needs `contracts` but never the
 #      report-only memwaste / shadow jobs, and the shadow is continue-on-error.
 #   3. every lane of scripts/ci/select-lanes.sh --list-lanes is served by a

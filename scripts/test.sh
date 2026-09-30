@@ -32,7 +32,7 @@ Modes:
   --contracts-only
                  Only the static contract steps (Step 0*) of the default leg:
                  no compiler, no build, no suites. PR CI runs this for
-                 docs-only changes, where no test leg is selected.
+                 docs-only and non-product changes (tiers T0a, T0b).
 
 Options:
   --arch ARCH    Force target arch (arm64 | x86_64), e.g. under Rosetta.

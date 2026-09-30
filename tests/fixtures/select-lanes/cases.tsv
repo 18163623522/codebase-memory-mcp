@@ -5,12 +5,12 @@
 # "FULL -a -b" = every PR lane except a and b).
 docs-only	README.md docs/BENCHMARK.md	T0a-docs	false	contracts security-static
 issue-template-is-docs	.github/ISSUE_TEMPLATE/bug.yml	T0a-docs	false	contracts security-static
-local-infra	test-infrastructure/run.sh	T0b-nonproduct	false	lint lint-mem security-static
-lint-config	scripts/memory-core-baseline.txt	T0b-nonproduct	false	lint lint-mem security-static
-graph-ui-adds-guards	graph-ui/src/App.tsx	T0b-nonproduct	false	lint lint-mem security-static smoke-ubuntu windows-guards
-memwaste-tools-add-memwaste	scripts/memwaste.sh	T0b-nonproduct	false	lint lint-mem memwaste security-static
-non-gating-script-runs-contracts-leg	scripts/benchmark-index.sh	T0b-nonproduct	false	lint lint-mem security-static shard-completeness unix-x86
-test-impact-tooling	scripts/test-impact/replay-selector.sh	T0b-nonproduct	false	lint lint-mem security-static shard-completeness unix-x86
+local-infra	test-infrastructure/run.sh	T0b-nonproduct	false	contracts lint lint-mem security-static
+lint-config	scripts/memory-core-baseline.txt	T0b-nonproduct	false	contracts lint lint-mem security-static
+graph-ui-adds-guards	graph-ui/src/App.tsx	T0b-nonproduct	false	contracts lint lint-mem security-static smoke-ubuntu windows-guards
+memwaste-tools-add-memwaste	scripts/memwaste.sh	T0b-nonproduct	false	contracts lint lint-mem memwaste security-static
+non-gating-script-runs-contracts-leg	scripts/benchmark-index.sh	T0b-nonproduct	false	contracts lint lint-mem security-static shard-completeness unix-x86
+test-impact-tooling	scripts/test-impact/replay-selector.sh	T0b-nonproduct	false	contracts lint lint-mem security-static shard-completeness unix-x86
 tests-only	tests/test_store.c	T1-tests	false	lint lint-mem security-static shard-completeness unix-macos14 unix-x86 windows
 test-fixture	tests/fixtures/cpp_include/a.h	T1-tests	false	lint lint-mem security-static shard-completeness unix-macos14 unix-x86 windows
 contract-test	tests/test_version_metadata_contract.sh	T1-tests	false	lint lint-mem security-static shard-completeness unix-macos14 unix-x86 windows

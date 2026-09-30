@@ -251,14 +251,15 @@ FULL = {"codeql-gate", "diag", "license-gate", "lint", "lint-mem", "lsan-macos",
         "smoke-mac", "smoke-ubuntu", "smoke-win", "tsan-arm", "tsan-mac", "tsan-x86",
         "unix-arm64", "unix-macos-intel", "unix-macos14", "unix-x86", "windows",
         "windows-guards"}
-UNIVERSE = FULL | {"contracts"}   # contracts: the docs-only job; every test leg runs them too
+UNIVERSE = FULL | {"contracts"}   # contracts: the T0a/T0b job; every test leg runs them too
 LINT = {"lint", "lint-mem"}
 CORE_LEGS = {"unix-x86", "unix-macos14", "windows", "shard-completeness"}
 TEST_LEGS = {"unix-x86", "unix-arm64", "unix-macos14", "unix-macos-intel", "windows"}
 ALWAYS = {"security-static"}
 R1 = {
     "T0a-docs": {"contracts"},
-    "T0b-nonproduct": LINT,
+    # The contract steps police test-infrastructure/ and lint config too.
+    "T0b-nonproduct": LINT | {"contracts"},
     "T1-tests": LINT | CORE_LEGS,
     "T2-extract": LINT | CORE_LEGS | {"codeql-gate", "tsan-x86", "smoke-ubuntu"},
     "T3-mid": LINT | CORE_LEGS | {"codeql-gate", "tsan-x86", "smoke-ubuntu"},
