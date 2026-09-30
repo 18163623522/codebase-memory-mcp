@@ -338,6 +338,14 @@ bash "$ROOT/tests/test_version_metadata_contract.sh"
 echo "=== Step 0y: VM leg verdict contract ==="
 bash "$ROOT/tests/test_vm_verdict_contract.sh"
 
+# Step 0z: PR CI runs only the lanes scripts/ci/select-lanes.sh selects, so a
+# wrong selection is a silent gate loss. The decision table, and the replay of
+# every September 2026 PR push and real failure against it.
+echo "=== Step 0z: PR lane selector contract ==="
+bash "$ROOT/tests/test_select_lanes.sh"
+echo "=== Step 0z2: lane selector history replay ==="
+bash "$ROOT/scripts/test-impact/replay-selector.sh"
+
 # Verify compiler supports target arch
 verify_compiler "$CC"
 

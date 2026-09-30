@@ -14,6 +14,7 @@ CI and the local infrastructure — both of which the venue-parity contract
 | `check-glibc-compat.sh` | Run a linux binary in debian:bullseye (glibc 2.31) — the portable binary must start on old glibc. | `_smoke.yml` portable legs |
 | `generate-sbom.py` | The release SPDX SBOM (vendored versions reviewable here, diffable by vendoring PRs — was inline YAML). | `release.yml` |
 | `require-all-green.sh` | The aggregate gate: fail unless every needed job succeeded or legitimately skipped (was inline YAML). | `pr.yml ci-ok` |
+| `select-lanes.sh` | Decide which PR lanes a change set runs (tier, lanes, full, reasons) from its file list — the R1 rule set, fail-safe to every lane. Pinned by `tests/test_select_lanes.sh` and the September 2026 history replay (`scripts/test-impact/replay-selector.sh`). | `pr.yml changes` |
 | `verify-shard-union.sh` | Prove sharded test legs lost nothing: shard count agreement, indices 1..n, identical suite lists, union of slices == full list (was inline YAML). | `_test.yml` shard-completeness |
 | `prepare-release-candidates.sh` | Copy one linker output into stripped/unstripped candidates, finalize signatures, composition-check them without execution, and record their hashes. | `_build.yml`, local artifact smoke |
 | `stage-release-candidates.py` | Admit exactly eight candidate artifacts / sixteen byte-distinct binaries into the content-addressed VirusTotal scan set. | `_build.yml` |
