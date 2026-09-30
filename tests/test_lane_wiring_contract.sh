@@ -81,6 +81,9 @@ pr = jobs(text("pr.yml"))
 changes = pr.get("changes", "")
 require("scripts/ci/select-lanes.sh --format github-output" in changes,
         "pr.yml changes must run scripts/ci/select-lanes.sh --format github-output")
+require("--expect-files" in changes and "github.event.pull_request.changed_files" in changes,
+        "pr.yml changes must pass the PR's changed_files to the selector (--expect-files), "
+        "so a truncated file list selects everything")
 for key in ("tier", "full", "lanes"):
     require(re.search(rf"(?m)^      {key}: \$\{{\{{ steps\.select\.outputs\.{key} \}}\}}$", changes),
             f"pr.yml changes must output {key}")

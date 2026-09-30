@@ -108,10 +108,14 @@ jobs:
         with:
           persist-credentials: false
 
+      # The pulls/files API lists at most 3000 files: the PR's own count lets
+      # the selector notice a cut list and select everything instead.
       - name: Select lanes
         id: select
+        env:
+          CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
         run: |
-          scripts/ci/select-lanes.sh --format github-output "$RUNNER_TEMP/changed-files.txt" > "$RUNNER_TEMP/selection.txt"
+          scripts/ci/select-lanes.sh --format github-output --expect-files "$CHANGED_FILES" "$RUNNER_TEMP/changed-files.txt" > "$RUNNER_TEMP/selection.txt"
           cat "$RUNNER_TEMP/selection.txt"
           cat "$RUNNER_TEMP/selection.txt" >> "$GITHUB_OUTPUT"
           # pr-smoke's legs, each tagged with its lane (kept in the job name,

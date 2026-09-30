@@ -9,7 +9,8 @@
 #     workflow, the test harness, Makefile.cbm and vendored code select FULL;
 #   - determinism: order and duplicates never change a byte of the output;
 #   - one decision per input channel: stdin, a file, --batch and the
-#     github-output form all agree.
+#     github-output form all agree;
+#   - a truncated file list (the pulls/files API stops at 3000) selects FULL.
 # The history replay (every September PR push + the real failures) is
 # scripts/test-impact/replay-selector.sh, a separate step.
 #
@@ -154,6 +155,51 @@ if rc != 0 or "Usage:" not in out:
 rc, _, err = run(["--definitely-not-a-flag"])
 if rc != 2 or "Please consult --help." not in err:
     failures.append("an unknown flag must exit 2 with 'Please consult --help.'")
+
+# 7. A truncated file list is never trusted. The pulls/files API lists at most
+#    3000 files, so fewer distinct paths than the PR's changed_files, a PR at
+#    the cap, or a list that reaches the cap selects FULL (file_list_truncated);
+#    the tier still classifies what was listed. A complete list decides as usual
+#    (renames add their old path, so a complete list may exceed the count).
+DOCS = ["README.md", "docs/a.md", "docs/b.md"]
+CAP_LIST = [f"docs/page{i:04d}.md" for i in range(3000)]
+
+
+def truncation(label, files, args, want_full):
+    rc, out, err = run(args, "".join(f + "\n" for f in files))
+    if rc != 0:
+        failures.append(f"truncation: {label}: selector exited {rc}: {err.strip()}")
+        return
+    got = json.loads(out)
+    flagged = any("file_list_truncated" in r for r in got["reasons"])
+    if got["full"] is not want_full or flagged is not want_full:
+        failures.append(f"truncation: {label}: full={got['full']}, file_list_truncated "
+                        f"reason={flagged}, expected {want_full}")
+    if want_full and set(got["lanes"]) != FULL:
+        failures.append(f"truncation: {label}: a truncated list must select every lane")
+    if got["tier"] != "T0a-docs":
+        failures.append(f"truncation: {label}: tier {got['tier']}, expected T0a-docs")
+
+
+truncation("fewer paths than changed_files", DOCS, ["--expect-files", "5"], True)
+truncation("complete list, count matches", DOCS, ["--expect-files", "3"], False)
+truncation("renames list their old path too", DOCS, ["--expect-files", "2"], False)
+truncation("a PR at the 3000-file cap", DOCS, ["--expect-files", "3000"], True)
+truncation("a list that reaches the cap", CAP_LIST, [], True)
+truncation("a complete list just under the cap", CAP_LIST[:2999], ["--expect-files", "2999"], False)
+rc, out, _ = run(["--format", "github-output", "--expect-files", "5"], "".join(f + "\n" for f in DOCS))
+if rc != 0 or "full=true" not in out.splitlines():
+    failures.append(f"truncation: github-output form must say full=true: {out!r}")
+trunc_batch = work / "trunc.jsonl"
+trunc_batch.write_text(json.dumps({"id": "t", "files": DOCS, "expect_files": 5}) + "\n", encoding="utf-8")
+rc, out, _ = run(["--batch", str(trunc_batch)])
+if rc != 0 or not json.loads(out.splitlines()[0])["full"]:
+    failures.append("truncation: --batch rows must honour expect_files")
+for bad in ("many", ""):   # "" = a workflow whose count went missing
+    rc, _, err = run(["--expect-files", bad], "README.md\n")
+    if rc != 2 or "Please consult --help." not in err:
+        failures.append(f"--expect-files {bad!r} must be a usage error (exit 2), never "
+                        f"a silently skipped truncation check")
 
 if failures:
     print("LANE SELECTOR CONTRACT VIOLATED:")

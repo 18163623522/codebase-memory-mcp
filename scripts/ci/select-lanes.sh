@@ -10,28 +10,35 @@
 # `full` overrides it with every lane.
 #
 # It FAILS SAFE: full=true for tier T5, a path no rule knows, an empty file
-# list, this script, any workflow, the test harness, Makefile.cbm (source
-# registration and flag changes look identical in a file list) and vendored
-# code. It is a pure function of the file SET: order, duplicates, blank lines
-# and CRLF never change a byte of the output.
+# list, a truncated one (file_list_truncated: the pulls/files API stops at
+# 3000 files), this script, any workflow, the test harness, Makefile.cbm
+# (source registration and flag changes look identical in a file list) and
+# vendored code. It is a pure function of the file SET (and the expected
+# count): order, duplicates, blank lines and CRLF never change a byte of the
+# output.
 #
-# Usage: scripts/ci/select-lanes.sh [--format json|github-output] [FILE]
+# Usage: scripts/ci/select-lanes.sh [--format json|github-output]
+#                                   [--expect-files N] [FILE]
 #          FILE (default stdin): changed paths, one per line.
+#          --expect-files N: the PR's changed_files; fewer distinct paths, or
+#          N or the list at the 3000-file API cap, means truncated -> full.
 #          json (default): {"full","lanes","reasons","tier"} on one line.
 #          github-output: tier=, full=, lanes=, reasons= lines ($GITHUB_OUTPUT).
 #        scripts/ci/select-lanes.sh --batch FILE
-#          FILE: JSON lines {"id":..., "files":[...]}; prints one json result
-#          per line with its "id" (the history replay's single process).
+#          FILE: JSON lines {"id":..., "files":[...], "expect_files"?: N};
+#          prints one json result per line with its "id" (the history
+#          replay's single process).
 #        scripts/ci/select-lanes.sh --list-lanes
 #          Every lane name, one per line (the universe ci-ok checks against).
 # Exit: 0 = decided · 2 = usage error.
 set -euo pipefail
 
-usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; }
 
 FORMAT=json
 MODE="select"
 INPUT=""
+EXPECT=""
 while [ $# -gt 0 ]; do
     case "$1" in
     -h | --help)
@@ -49,6 +56,13 @@ while [ $# -gt 0 ]; do
         [ $# -gt 1 ] && shift
         ;;
     --list-lanes) MODE="list" ;;
+    --expect-files)
+        # An empty value (a workflow whose count went missing) must fail
+        # loudly, never quietly skip the truncation check.
+        EXPECT="${2:-}"
+        [ -n "$EXPECT" ] || EXPECT="missing"
+        [ $# -gt 1 ] && shift
+        ;;
     -*)
         echo "select-lanes.sh: unknown option '$1'. Please consult --help." >&2
         exit 2
@@ -70,6 +84,12 @@ json | github-output) ;;
     exit 2
     ;;
 esac
+case "${EXPECT:-0}" in
+*[!0-9]*)
+    echo "select-lanes.sh: --expect-files takes a file count. Please consult --help." >&2
+    exit 2
+    ;;
+esac
 if [ "$MODE" = batch ] && [ -z "$INPUT" ]; then
     echo "select-lanes.sh: --batch needs a file. Please consult --help." >&2
     exit 2
@@ -88,12 +108,13 @@ if [ "$MODE" = select ] && [ -z "$INPUT" ]; then
     INPUT="$STAGED"
 fi
 
-python3 - "$MODE" "$FORMAT" "$INPUT" <<'PY'
+python3 - "$MODE" "$FORMAT" "$INPUT" "$EXPECT" <<'PY'
 import json
 import re
 import sys
 
 mode, fmt, source = sys.argv[1:4]
+expect = int(sys.argv[4]) if sys.argv[4] else None
 
 # ── Path -> category (first matching rule wins; order is part of the rule) ──
 GATE_WORKFLOWS = {"pr.yml", "_test.yml", "_lint.yml", "_security.yml",
@@ -276,7 +297,23 @@ def triggers(path, cat):
     return found
 
 
-def select(paths):
+LIST_CAP = 3000   # the pulls/files API lists at most this many files
+
+
+def truncated(paths, expect):
+    """A list that may be missing files: at or over the API cap, or shorter
+    than the PR's changed_files (a complete list is never shorter: every
+    changed file is listed, renames add their old path on top)."""
+    if len(paths) >= LIST_CAP:
+        return f"{len(paths)} paths listed, at the {LIST_CAP}-file API cap"
+    if expect is not None and expect >= LIST_CAP:
+        return f"the PR changes {expect} files, over the {LIST_CAP}-file API cap"
+    if expect is not None and len(paths) < expect:
+        return f"{len(paths)} paths listed for {expect} changed files"
+    return None
+
+
+def select(paths, expect=None):
     paths = sorted({p for p in paths if p})
     by_cat, by_trigger = {}, {}
     for path in paths:
@@ -302,7 +339,10 @@ def select(paths):
         reasons.append("full: empty file list (fail safe)")
     if tier == "T5-core":
         reasons.append("full: tier T5-core")
-    full = tier == "T5-core" or bool(by_trigger) or not paths
+    short = truncated(paths, expect)
+    if short:
+        reasons.append(f"full: file_list_truncated: {short} (fail safe)")
+    full = tier == "T5-core" or bool(by_trigger) or not paths or bool(short)
     if full:
         lanes = set(FULL)
     return {"full": full, "lanes": sorted(lanes), "reasons": sorted(reasons), "tier": tier}
@@ -324,13 +364,13 @@ elif mode == "batch":
         for line in fh:
             if line.strip():
                 row = json.loads(line)
-                print(dump({"id": row["id"], **select(row["files"])}))
+                print(dump({"id": row["id"], **select(row["files"], row.get("expect_files"))}))
 elif fmt == "github-output":
-    decision = select(read_paths(source))
+    decision = select(read_paths(source), expect)
     print(f"tier={decision['tier']}")
     print(f"full={'true' if decision['full'] else 'false'}")
     print(f"lanes={dump(decision['lanes'])}")
     print(f"reasons={dump(decision['reasons'])}")
 else:
-    print(dump(select(read_paths(source))))
+    print(dump(select(read_paths(source), expect)))
 PY
