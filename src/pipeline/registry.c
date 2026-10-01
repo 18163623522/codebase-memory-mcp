@@ -811,6 +811,52 @@ bool cbm_go_suppress_bare_field_ref(bool is_go, bool is_member_access, const cha
     return strcmp(target_label, "Field") == 0;
 }
 
+cbm_field_call_policy_t cbm_call_onto_field_policy(CBMLanguage caller_lang, const char *callee_text,
+                                                   const char *target_label,
+                                                   const char *target_file_path) {
+    /* The short-name registry holds Field nodes, so a call spelled like some
+     * struct member can resolve onto that Field. Three shapes are decided here:
+     *   - a caller in another language: nothing but the spelling connects a
+     *     Bash `command` or a Python `sorted()` to a C struct member. The
+     *     unique_name exemption of the CALLS guard (#1572) is about functions;
+     *     for a Field the #1928 reference rule applies, with its JS/TS and
+     *     C/C++ family exemptions;
+     *   - a bare C call (`socket(...)`, a function-pointer parameter
+     *     `want(x)`): a bare C name is never a struct member;
+     *   - a C or C++ member call (`cb.close(ctx)`, `text.size()`): the type of
+     *     the object decides which struct's member is called, never the
+     *     member name alone. The C LSP publishes owners in both modes.
+     * A bare C++ call keeps its resolution (a method body reaches its own
+     * members without a selector), and so does every other language. */
+    if (!target_label || strcmp(target_label, "Field") != 0) {
+        return CBM_FIELD_CALL_KEEP;
+    }
+    if (cbm_suppress_cross_language_ref(caller_lang, target_file_path)) {
+        return CBM_FIELD_CALL_DROP;
+    }
+    if (caller_lang != CBM_LANG_C && caller_lang != CBM_LANG_CPP) {
+        return CBM_FIELD_CALL_KEEP;
+    }
+    if (callee_text && (strchr(callee_text, '.') || strstr(callee_text, "->"))) {
+        return CBM_FIELD_CALL_BY_OWNER;
+    }
+    return caller_lang == CBM_LANG_C ? CBM_FIELD_CALL_DROP : CBM_FIELD_CALL_KEEP;
+}
+
+bool cbm_c_member_binds_by_owner(bool is_c, bool is_member_access) {
+    /* The member half of `a.b` / `a->b` is not a name in any C scope: only the
+     * type of `a` gives `b` a meaning. Handing the bare `b` to the short-name
+     * registry bound whichever Field (or function, or variable) was called
+     * `b` -- on this repository 9,150 USAGE and 2,810 WRITES edges onto
+     * Fields, 3,976 of the USAGE edges on a name several structs share. Such a
+     * reference binds only through the C LSP's field-owner rows.
+     *
+     * C-gated like the Go rule above: a C++ or Objective-C method body
+     * reaches its own members without a selector, and their member accesses
+     * keep the existing resolution until their LSPs publish owners too. */
+    return is_c && is_member_access;
+}
+
 /* ── Lifecycle ──────────────────────────────────────────────────── */
 
 cbm_registry_t *cbm_registry_new(void) {

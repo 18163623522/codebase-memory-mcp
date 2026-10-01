@@ -873,6 +873,26 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call, const CBM
     if (!target_node || source_node->id == target_node->id) {
         return 0;
     }
+    /* A call that resolved onto a struct Field: refused across languages and
+     * for a bare C call; a C/C++ member call takes the Field its object's type
+     * names instead of the one the member name happened to find. */
+    switch (cbm_call_onto_field_policy(lang, call->callee_name, target_node->label,
+                                       target_node->file_path)) {
+    case CBM_FIELD_CALL_DROP:
+        return 0;
+    case CBM_FIELD_CALL_BY_OWNER:
+        target_node =
+            cbm_pipeline_c_member_call_field(lsp_calls, NULL, ctx->gbuf, ctx->project_name,
+                                             call->enclosing_func_qn, call->callee_name);
+        if (!target_node || source_node->id == target_node->id) {
+            return 0;
+        }
+        res.qualified_name = target_node->qualified_name;
+        res.strategy = "lsp_field_access";
+        break;
+    case CBM_FIELD_CALL_KEEP:
+        break;
+    }
     /* #725: suffix_match is language-agnostic and will attach a Python
      * Store.commit() call to a JS function named commit (or a Bash main
      * to a Python main). Drop that weak cross-language edge. */

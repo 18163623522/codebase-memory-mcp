@@ -1037,6 +1037,53 @@ TEST(go_bare_ref_never_binds_field) {
     PASS();
 }
 
+TEST(call_onto_field_follows_language_and_shape) {
+    /* A call the registry resolved onto a Field node. */
+    /* Another language: only the spelling connects them. */
+    ASSERT_EQ(cbm_call_onto_field_policy(CBM_LANG_BASH, "command", "Field", "src/probe.h"),
+              CBM_FIELD_CALL_DROP);
+    ASSERT_EQ(cbm_call_onto_field_policy(CBM_LANG_PYTHON, "sorted", "Field", "src/pool.c"),
+              CBM_FIELD_CALL_DROP);
+    /* A bare C call is never a struct member. */
+    ASSERT_EQ(cbm_call_onto_field_policy(CBM_LANG_C, "socket", "Field", "tests/t.c"),
+              CBM_FIELD_CALL_DROP);
+    /* A C member call is decided by its object's type, in a .c or a .h. */
+    ASSERT_EQ(cbm_call_onto_field_policy(CBM_LANG_C, "cb.close", "Field", "src/cb.h"),
+              CBM_FIELD_CALL_BY_OWNER);
+    ASSERT_EQ(cbm_call_onto_field_policy(CBM_LANG_C, "w->svc->app.cancel", "Field", "src/a.c"),
+              CBM_FIELD_CALL_BY_OWNER);
+    /* C++ reaches its own members bare, so a bare call keeps its resolution;
+     * a member call is typed like C's (`text.size()` is not some struct's
+     * `size` member). */
+    ASSERT_EQ(cbm_call_onto_field_policy(CBM_LANG_CPP, "handler", "Field", "src/a.h"),
+              CBM_FIELD_CALL_KEEP);
+    ASSERT_EQ(cbm_call_onto_field_policy(CBM_LANG_CPP, "text.size", "Field", "src/a.h"),
+              CBM_FIELD_CALL_BY_OWNER);
+    /* The same language as the Field keeps its resolution too. */
+    ASSERT_EQ(cbm_call_onto_field_policy(CBM_LANG_GO, "s.fn", "Field", "pkg/s.go"),
+              CBM_FIELD_CALL_KEEP);
+    /* Not a Field target: not this rule's business. */
+    ASSERT_EQ(cbm_call_onto_field_policy(CBM_LANG_BASH, "main", "Function", "src/main.c"),
+              CBM_FIELD_CALL_KEEP);
+    ASSERT_EQ(cbm_call_onto_field_policy(CBM_LANG_C, "socket", NULL, "tests/t.c"),
+              CBM_FIELD_CALL_KEEP);
+    PASS();
+}
+
+TEST(c_member_access_binds_by_owner_only) {
+    /* The member half of a C `a.b` / `a->b` means nothing without the type of
+     * `a`: it binds through the C LSP's field-owner rows and never through a
+     * bare-name lookup. The selector shape arrives as is_member_access. */
+    ASSERT_TRUE(cbm_c_member_binds_by_owner(true, true));
+    /* A bare C identifier keeps the ordinary resolution. */
+    ASSERT_FALSE(cbm_c_member_binds_by_owner(true, false));
+    /* Other languages keep theirs: a C++ or Objective-C method body reaches its
+     * own members without a selector, and Go has its own rule above. */
+    ASSERT_FALSE(cbm_c_member_binds_by_owner(false, true));
+    ASSERT_FALSE(cbm_c_member_binds_by_owner(false, false));
+    PASS();
+}
+
 TEST(dynamic_suppress_drops_weak_method_matches) {
     /* #592/#606/#1276: a member call whose receiver the LSP could not type, that
      * landed via a WEAK short-name strategy, is generic-resolver noise → drop.
@@ -1296,6 +1343,8 @@ SUITE(registry) {
     RUN_TEST(registry_tie_break_is_independent_of_registration_order);
     RUN_TEST(cross_language_ref_drops_go_vs_c);
     RUN_TEST(go_bare_ref_never_binds_field);
+    RUN_TEST(call_onto_field_follows_language_and_shape);
+    RUN_TEST(c_member_access_binds_by_owner_only);
     RUN_TEST(dynamic_suppress_drops_weak_method_matches);
     RUN_TEST(dynamic_suppress_keeps_high_confidence_and_non_methods);
     RUN_TEST(python_builtin_member_table_matches_builtin_type_methods);

@@ -63,6 +63,15 @@ typedef struct {
     int neg_memo_cap;   // power-of-two; 0 until first insert
     int neg_memo_count; // live entries (grow by rehash at 70% load)
 
+    // Field references already emitted for this file, keyed by (enclosing
+    // function, owner type, field). The function -> Field edge needs one row
+    // per pair; a row per occurrence would cost a record for every member
+    // access in the corpus. Same uint64 hash-set shape and ownership as
+    // neg_memo; freed at end of c_lsp_process_file.
+    uint64_t *field_ref_seen;
+    int field_ref_seen_cap;
+    int field_ref_seen_count;
+
     // Output
     CBMResolvedCallArray *resolved_calls;
     CBMSourceOrigin source_origin; // source buffer represented by emitted occurrence spans

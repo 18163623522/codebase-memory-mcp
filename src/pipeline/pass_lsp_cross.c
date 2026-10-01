@@ -462,24 +462,28 @@ static int pxc_build_lsp_def(CBMArena *arena, const CBMDefinition *src, const ch
     return 0;
 }
 
-/* Go: fold per-field "Field" definitions into their owning struct's
+/* Go and C: fold per-field "Field" definitions into their owning type's
  * field_defs. extract_defs.c emits one flat CBMDefinition per struct field
  * (label "Field", parent_class = owning struct QN, name = field name,
  * return_type = raw type text). Those rows are dropped by pxc_build_lsp_def
- * (pxc_map_label excludes "Field"), so without this fold every Go struct
- * registers with zero fields and field-chain calls (h.svc.Handle) can
- * never resolve. Fields are always declared in the same file as their struct,
- * so scanning the file's own defs covers every case. Runs inside
+ * (pxc_map_label excludes "Field"), so without this fold every struct
+ * registers with zero fields: Go field-chain calls (h.svc.Handle) can never
+ * resolve, and a C member access on a struct from another file (every header)
+ * has no owner to bind. Fields are always declared in the same file as their
+ * struct, so scanning the file's own defs covers every case. Runs inside
  * cbm_pxc_collect_all_defs — one site covers both the prebuilt-registry path
- * and the per-file fallback, since both consume all_defs. */
-static void pxc_fold_go_struct_fields(CBMArena *arena, const CBMFileResult *result, CBMLSPDef *defs,
-                                      int start, int end) {
+ * and the per-file fallback, since both consume all_defs.
+ *
+ * type_label is the label the language's aggregate carries: "Struct" for Go,
+ * "Class" for a C struct or union. */
+static void pxc_fold_struct_fields(CBMArena *arena, const CBMFileResult *result, CBMLSPDef *defs,
+                                   int start, int end, const char *type_label) {
     if (!arena || !result || !defs || start >= end) {
         return;
     }
     for (int si = start; si < end; si++) {
         CBMLSPDef *dst = &defs[si];
-        if (!dst->label || strcmp(dst->label, "Struct") != 0 || !dst->qualified_name) {
+        if (!dst->label || strcmp(dst->label, type_label) != 0 || !dst->qualified_name) {
             continue;
         }
         int count = 0;
@@ -636,7 +640,11 @@ CBMLSPDef *cbm_pxc_collect_all_defs(const cbm_pipeline_ctx_t *ctx, CBMArena *are
         }
         cbm_pxc_free_import_map(imp_keys, imp_vals, imp_count); /* NULL-safe */
         if (files[fi].language == CBM_LANG_GO) {
-            pxc_fold_go_struct_fields(arena, fr, defs, file_start, idx);
+            pxc_fold_struct_fields(arena, fr, defs, file_start, idx, "Struct");
+        } else if (files[fi].language == CBM_LANG_C || files[fi].language == CBM_LANG_CPP) {
+            /* Both: a `.h` file is classified C++, and that is where C declares
+             * the structs its `.c` files access. */
+            pxc_fold_struct_fields(arena, fr, defs, file_start, idx, "Class");
         }
         if (files[fi].language == CBM_LANG_RUST) {
             for (int ii = 0; ii < fr->impl_traits.count; ii++) {

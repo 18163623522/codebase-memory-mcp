@@ -418,6 +418,10 @@ typedef struct {
 typedef enum {
     CBM_RESOLVED_INVOCATION = 0,
     CBM_RESOLVED_CALL_REFERENCE,
+    /* C-family member access `a.b` / `a->b`: callee_qn is the Field `b` of the
+     * type of `a`. One row per (caller, field), not per occurrence, and no site
+     * span: the join is by enclosing function and member name. */
+    CBM_RESOLVED_FIELD_REFERENCE,
 } CBMResolvedKind;
 
 // LSP-resolved invocation/reference: high-confidence type-aware resolution.

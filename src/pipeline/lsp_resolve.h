@@ -22,6 +22,7 @@
 #define CBM_PIPELINE_LSP_RESOLVE_H
 
 #include "cbm.h"
+#include "foundation/mem_core.h" /* field-owner index storage */
 #include "graph_buffer/graph_buffer.h"
 #include "foundation/constants.h"
 
@@ -880,6 +881,166 @@ static inline const CBMResolvedCall *cbm_pipeline_find_lsp_reference_indexed_in_
 static inline const CBMResolvedCall *cbm_pipeline_find_lsp_reference(
     const CBMResolvedCallArray *arr, const CBMUsage *usage, bool allow_tail_match) {
     return cbm_pipeline_find_lsp_reference_in_graph(arr, usage, allow_tail_match, NULL, NULL);
+}
+
+/* ── C member access: bind a field through its owner ─────────────────
+ *
+ * The member half of `a.b` / `a->b` is not a name in any scope: only the type
+ * of `a` gives `b` a meaning. The C LSP publishes that as FIELD_REFERENCE rows,
+ * one per (enclosing function, owner field). The usage and read/write
+ * resolvers join them by enclosing function and member name, which is exactly
+ * the granularity of the function -> Field edge they emit. */
+
+/* FIELD_REFERENCE rows sorted by (caller, member name, target). A NULL `rows`
+ * with a nonzero source array means the allocation failed and lookups scan the
+ * array instead, so no typed edge is ever lost to an index. */
+typedef struct {
+    const CBMResolvedCall **rows;
+    int count;
+} cbm_pipeline_lsp_field_index_t;
+
+static inline bool cbm_pipeline_lsp_field_row_usable(const CBMResolvedCall *row) {
+    return row->kind == CBM_RESOLVED_FIELD_REFERENCE && row->caller_qn && row->callee_qn &&
+           row->confidence >= CBM_LSP_CONFIDENCE_FLOOR;
+}
+
+static inline int cbm_pipeline_lsp_field_key_cmp(const CBMResolvedCall *row, const char *caller_qn,
+                                                 const char *member) {
+    int by_caller = strcmp(row->caller_qn, caller_qn);
+    return by_caller != 0 ? by_caller : strcmp(cbm_lsp_bare_segment(row->callee_qn), member);
+}
+
+static inline int cbm_pipeline_lsp_field_row_cmp(const void *left_ptr, const void *right_ptr) {
+    const CBMResolvedCall *left = *(const CBMResolvedCall *const *)left_ptr;
+    const CBMResolvedCall *right = *(const CBMResolvedCall *const *)right_ptr;
+    int by_key = cbm_pipeline_lsp_field_key_cmp(left, right->caller_qn,
+                                                cbm_lsp_bare_segment(right->callee_qn));
+    return by_key != 0 ? by_key : strcmp(left->callee_qn, right->callee_qn);
+}
+
+/* False means only allocation failure; lookups then take the linear path. */
+static inline bool cbm_pipeline_lsp_field_index_build(const CBMResolvedCallArray *arr,
+                                                      cbm_pipeline_lsp_field_index_t *index) {
+    index->rows = NULL;
+    index->count = 0;
+    int field_count = 0;
+    for (int i = 0; arr && i < arr->count; i++) {
+        if (cbm_pipeline_lsp_field_row_usable(&arr->items[i])) {
+            field_count++;
+        }
+    }
+    if (field_count == 0) {
+        return true;
+    }
+    const CBMResolvedCall **rows = (const CBMResolvedCall **)cbm_alloc(
+        CBM_MEM_CLASS_EXTRACT, (size_t)field_count * sizeof(*rows));
+    if (!rows) {
+        return false;
+    }
+    int next = 0;
+    for (int i = 0; i < arr->count; i++) {
+        if (cbm_pipeline_lsp_field_row_usable(&arr->items[i])) {
+            rows[next++] = &arr->items[i];
+        }
+    }
+    qsort(rows, (size_t)field_count, sizeof(*rows), cbm_pipeline_lsp_field_row_cmp);
+    index->rows = rows;
+    index->count = field_count;
+    return true;
+}
+
+static inline void cbm_pipeline_lsp_field_index_free(cbm_pipeline_lsp_field_index_t *index) {
+    cbm_free(CBM_MEM_CLASS_EXTRACT, (void *)index->rows);
+    index->rows = NULL;
+    index->count = 0;
+}
+
+/* Walks the owner rows of one (function, member name). `index` NULL selects
+ * the linear scan over `arr`. */
+typedef struct {
+    const cbm_pipeline_lsp_field_index_t *index;
+    const CBMResolvedCallArray *arr;
+    const char *caller_qn;
+    const char *member;
+    int next;
+} cbm_pipeline_lsp_field_cursor_t;
+
+static inline cbm_pipeline_lsp_field_cursor_t cbm_pipeline_lsp_field_cursor(
+    const CBMResolvedCallArray *arr, const cbm_pipeline_lsp_field_index_t *index,
+    const char *caller_qn, const char *member) {
+    cbm_pipeline_lsp_field_cursor_t cursor = {index, arr, caller_qn, member, 0};
+    if (index && caller_qn && member) {
+        int low = 0;
+        int high = index->count;
+        while (low < high) {
+            int middle = low + (high - low) / 2;
+            if (cbm_pipeline_lsp_field_key_cmp(index->rows[middle], caller_qn, member) < 0) {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        cursor.next = low;
+    }
+    return cursor;
+}
+
+static inline const CBMResolvedCall *cbm_pipeline_lsp_field_next(
+    cbm_pipeline_lsp_field_cursor_t *cursor) {
+    if (!cursor->caller_qn || !cursor->member) {
+        return NULL;
+    }
+    if (cursor->index) {
+        if (cursor->next >= cursor->index->count) {
+            return NULL;
+        }
+        const CBMResolvedCall *row = cursor->index->rows[cursor->next];
+        if (cbm_pipeline_lsp_field_key_cmp(row, cursor->caller_qn, cursor->member) != 0) {
+            return NULL;
+        }
+        cursor->next++;
+        return row;
+    }
+    while (cursor->arr && cursor->next < cursor->arr->count) {
+        const CBMResolvedCall *row = &cursor->arr->items[cursor->next++];
+        if (cbm_pipeline_lsp_field_row_usable(row) &&
+            cbm_pipeline_lsp_field_key_cmp(row, cursor->caller_qn, cursor->member) == 0) {
+            return row;
+        }
+    }
+    return NULL;
+}
+
+/* The graph node of an owner row, or NULL when the owner is not a project
+ * Field (a libc struct, say). Exact QN only: a name fallback here would undo
+ * the typing the row carries. */
+static inline const cbm_gbuf_node_t *cbm_pipeline_lsp_field_node(const cbm_gbuf_t *gbuf,
+                                                                 const char *project_name,
+                                                                 const CBMResolvedCall *row) {
+    const cbm_gbuf_node_t *node =
+        cbm_pipeline_lsp_target_node_policy(gbuf, project_name, row->callee_qn, false, false);
+    return node && node->label && strcmp(node->label, "Field") == 0 ? node : NULL;
+}
+
+/* The Field a C member call (`cb.close(ctx)`) lands on, decided by the type of
+ * its object: among the owner rows of (enclosing function, member name) that
+ * name a project Field, the one with the smallest QN, so the sequential scan
+ * and the sorted index agree. NULL when no owner is known. */
+static inline const cbm_gbuf_node_t *cbm_pipeline_c_member_call_field(
+    const CBMResolvedCallArray *arr, const cbm_pipeline_lsp_field_index_t *index,
+    const cbm_gbuf_t *gbuf, const char *project_name, const char *enclosing_func_qn,
+    const char *callee_text) {
+    cbm_pipeline_lsp_field_cursor_t owners = cbm_pipeline_lsp_field_cursor(
+        arr, index, enclosing_func_qn, cbm_lsp_bare_segment(callee_text));
+    const cbm_gbuf_node_t *best = NULL;
+    const CBMResolvedCall *owner;
+    while ((owner = cbm_pipeline_lsp_field_next(&owners)) != NULL) {
+        const cbm_gbuf_node_t *field = cbm_pipeline_lsp_field_node(gbuf, project_name, owner);
+        if (field && (!best || strcmp(field->qualified_name, best->qualified_name) < 0)) {
+            best = field;
+        }
+    }
+    return best;
 }
 
 /* Resolve an LSP-emitted callee_qn to a graph-buffer node.

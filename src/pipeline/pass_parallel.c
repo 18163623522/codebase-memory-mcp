@@ -2893,6 +2893,10 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
         }
     }
 
+    /* Field-owner rows, indexed on the first C member call that needs them. */
+    cbm_pipeline_lsp_field_index_t field_index = {0};
+    bool field_index_built = false;
+    bool field_index_ready = false;
     for (int c = 0; c < result->calls.count; c++) {
         CBMCall *call = &result->calls.items[c];
         if (!call->callee_name) {
@@ -3137,6 +3141,31 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
         }
         atomic_fetch_add_explicit(&rc->time_ns_rc_target, extract_now_ns() - _rc_t0,
                                   memory_order_relaxed);
+        /* A call that resolved onto a struct Field: refused across languages
+         * and for a bare C call; a C/C++ member call takes the Field its
+         * object's type names. Mirrors the sequential twin (pass_calls.c). */
+        if (target_node && source_node->id != target_node->id) {
+            cbm_field_call_policy_t field_policy = cbm_call_onto_field_policy(
+                lang, call->callee_name, target_node->label, target_node->file_path);
+            if (field_policy == CBM_FIELD_CALL_DROP) {
+                continue;
+            }
+            if (field_policy == CBM_FIELD_CALL_BY_OWNER) {
+                if (!field_index_built) {
+                    field_index_ready =
+                        cbm_pipeline_lsp_field_index_build(&result->resolved_calls, &field_index);
+                    field_index_built = true;
+                }
+                target_node = cbm_pipeline_c_member_call_field(
+                    &result->resolved_calls, field_index_ready ? &field_index : NULL, rc->main_gbuf,
+                    rc->project_name, call->enclosing_func_qn, call->callee_name);
+                if (!target_node || source_node->id == target_node->id) {
+                    continue;
+                }
+                res.qualified_name = target_node->qualified_name;
+                res.strategy = "lsp_field_access";
+            }
+        }
         if (target_node && source_node->id != target_node->id &&
             cbm_suppress_cross_language_suffix_match(lang, target_node->file_path, res.strategy)) {
             /* #725: same guard as pass_calls.c — do not emit a suffix_match
@@ -3180,6 +3209,7 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
         cbm_ht_foreach(lsp_legacy_idx, lsp_idx_free_key, NULL);
         cbm_ht_free(lsp_legacy_idx);
     }
+    cbm_pipeline_lsp_field_index_free(&field_index);
 }
 
 /* Resolve usages for one file. */
@@ -3190,6 +3220,9 @@ static void resolve_file_usages(resolve_ctx_t *rc, resolve_worker_state_t *ws,
     cbm_pipeline_lsp_reference_index_t reference_index = {0};
     bool reference_index_ready =
         cbm_pipeline_lsp_reference_index_build(&result->resolved_calls, &reference_index);
+    cbm_pipeline_lsp_field_index_t field_index = {0};
+    bool field_index_ready =
+        cbm_pipeline_lsp_field_index_build(&result->resolved_calls, &field_index);
     for (int u = 0; u < result->usages.count; u++) {
         CBMUsage *usage = &result->usages.items[u];
         if (!usage->ref_name) {
@@ -3198,6 +3231,30 @@ static void resolve_file_usages(resolve_ctx_t *rc, resolve_worker_state_t *ws,
         const cbm_gbuf_node_t *src =
             find_source_node(rc->main_gbuf, rc->project_name, rel, usage->enclosing_func_qn);
         if (!src) {
+            continue;
+        }
+        /* A C member name binds through the type of its object, published by
+         * the C LSP as field-owner rows, and through nothing else. Must mirror
+         * the sequential twin (pass_usages.c) exactly. */
+        if (usage->kind == CBM_USAGE_VALUE &&
+            cbm_c_member_binds_by_owner(lang == CBM_LANG_C, usage->is_member_access)) {
+            cbm_pipeline_lsp_field_cursor_t owners = cbm_pipeline_lsp_field_cursor(
+                &result->resolved_calls, field_index_ready ? &field_index : NULL,
+                usage->enclosing_func_qn, usage->ref_name);
+            const CBMResolvedCall *owner;
+            while ((owner = cbm_pipeline_lsp_field_next(&owners)) != NULL) {
+                const cbm_gbuf_node_t *field =
+                    cbm_pipeline_lsp_field_node(rc->main_gbuf, rc->project_name, owner);
+                if (!field || field->id == src->id) {
+                    continue;
+                }
+                char member_esc[CBM_SZ_256];
+                cbm_json_escape(member_esc, sizeof(member_esc), usage->ref_name);
+                char member_props[CBM_SZ_512];
+                snprintf(member_props, sizeof(member_props), "{\"callee\":\"%s\"}", member_esc);
+                cbm_gbuf_insert_edge(ws->local_edge_buf, src->id, field->id, "USAGE", member_props);
+                ws->usages_resolved++;
+            }
             continue;
         }
         const cbm_gbuf_node_t *tgt = NULL;
@@ -3278,6 +3335,7 @@ static void resolve_file_usages(resolve_ctx_t *rc, resolve_worker_state_t *ws,
         ws->usages_resolved++;
     }
     cbm_pipeline_lsp_reference_index_free(&reference_index);
+    cbm_pipeline_lsp_field_index_free(&field_index);
 }
 
 /* Resolve throws/raises for one file. */
@@ -3315,6 +3373,9 @@ static void resolve_file_throws(resolve_ctx_t *rc, resolve_worker_state_t *ws,
 static void resolve_file_rw(resolve_ctx_t *rc, resolve_worker_state_t *ws, CBMFileResult *result,
                             const char *rel, const char *module_qn, const char **imp_keys,
                             const char **imp_vals, int imp_count, CBMLanguage lang) {
+    cbm_pipeline_lsp_field_index_t field_index = {0};
+    bool field_index_ready =
+        cbm_pipeline_lsp_field_index_build(&result->resolved_calls, &field_index);
     for (int r = 0; r < result->rw.count; r++) {
         CBMReadWrite *rw = &result->rw.items[r];
         if (!rw->var_name) {
@@ -3323,6 +3384,24 @@ static void resolve_file_rw(resolve_ctx_t *rc, resolve_worker_state_t *ws, CBMFi
         const cbm_gbuf_node_t *src =
             find_source_node(rc->main_gbuf, rc->project_name, rel, rw->enclosing_func_qn);
         if (!src) {
+            continue;
+        }
+        /* C member read/write: same owner join as resolve_file_usages. Mirrors
+         * the sequential twin (pass_usages.c). */
+        if (cbm_c_member_binds_by_owner(lang == CBM_LANG_C, rw->is_member_access)) {
+            cbm_pipeline_lsp_field_cursor_t owners = cbm_pipeline_lsp_field_cursor(
+                &result->resolved_calls, field_index_ready ? &field_index : NULL,
+                rw->enclosing_func_qn, rw->var_name);
+            const CBMResolvedCall *owner;
+            while ((owner = cbm_pipeline_lsp_field_next(&owners)) != NULL) {
+                const cbm_gbuf_node_t *field =
+                    cbm_pipeline_lsp_field_node(rc->main_gbuf, rc->project_name, owner);
+                if (!field || field->id == src->id) {
+                    continue;
+                }
+                cbm_gbuf_insert_edge(ws->local_edge_buf, src->id, field->id,
+                                     rw->is_write ? "WRITES" : "READS", "{}");
+            }
             continue;
         }
         cbm_resolution_t res = cbm_registry_resolve(rc->registry, rw->var_name, module_qn, imp_keys,
@@ -3348,6 +3427,7 @@ static void resolve_file_rw(resolve_ctx_t *rc, resolve_worker_state_t *ws, CBMFi
         const char *etype = rw->is_write ? "WRITES" : "READS";
         cbm_gbuf_insert_edge(ws->local_edge_buf, src->id, tgt->id, etype, "{}");
     }
+    cbm_pipeline_lsp_field_index_free(&field_index);
 }
 
 /* Resolve base_classes → INHERITS edges for one definition. */
@@ -3564,6 +3644,54 @@ static bool pp_has_pending_lsp_site(const CBMFileResult *result) {
     return false;
 }
 
+/* A C member access binds only through a field-owner row. The per-file walk
+ * publishes owners for the structs its own file declares; a struct from a
+ * header is known only to the cross-file pass. A member access that still has
+ * no owner is therefore a request for that pass, exactly like an unqualified
+ * call site -- without it a file with no pending call would keep none of its
+ * edges onto header-declared fields. */
+static bool pp_has_unowned_c_member(const CBMFileResult *result, CBMLanguage lang) {
+    if (lang != CBM_LANG_C) {
+        return false;
+    }
+    cbm_pipeline_lsp_field_index_t field_index = {0};
+    bool ready = cbm_pipeline_lsp_field_index_build(&result->resolved_calls, &field_index);
+    bool unowned = false;
+    for (int i = 0; i < result->usages.count && !unowned; i++) {
+        const CBMUsage *usage = &result->usages.items[i];
+        if (usage->kind != CBM_USAGE_VALUE || !usage->is_member_access || !usage->ref_name) {
+            continue;
+        }
+        cbm_pipeline_lsp_field_cursor_t owners =
+            cbm_pipeline_lsp_field_cursor(&result->resolved_calls, ready ? &field_index : NULL,
+                                          usage->enclosing_func_qn, usage->ref_name);
+        unowned = cbm_pipeline_lsp_field_next(&owners) == NULL;
+    }
+    for (int i = 0; i < result->rw.count && !unowned; i++) {
+        const CBMReadWrite *rw = &result->rw.items[i];
+        if (!rw->is_member_access || !rw->var_name) {
+            continue;
+        }
+        cbm_pipeline_lsp_field_cursor_t owners =
+            cbm_pipeline_lsp_field_cursor(&result->resolved_calls, ready ? &field_index : NULL,
+                                          rw->enclosing_func_qn, rw->var_name);
+        unowned = cbm_pipeline_lsp_field_next(&owners) == NULL;
+    }
+    for (int i = 0; i < result->calls.count && !unowned; i++) {
+        const CBMCall *call = &result->calls.items[i];
+        if (!call->callee_name ||
+            (!strchr(call->callee_name, '.') && !strstr(call->callee_name, "->"))) {
+            continue;
+        }
+        cbm_pipeline_lsp_field_cursor_t owners = cbm_pipeline_lsp_field_cursor(
+            &result->resolved_calls, ready ? &field_index : NULL, call->enclosing_func_qn,
+            cbm_lsp_bare_segment(call->callee_name));
+        unowned = cbm_pipeline_lsp_field_next(&owners) == NULL;
+    }
+    cbm_pipeline_lsp_field_index_free(&field_index);
+    return unowned;
+}
+
 static void resolve_worker(int worker_id, void *ctx_ptr) {
     resolve_ctx_t *rc = ctx_ptr;
     resolve_worker_state_t *ws = &rc->workers[worker_id];
@@ -3651,11 +3779,13 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
         int semantic_sites = result->calls.count + call_reference_sites;
         int qualified_lsp_sites = pp_qualified_lsp_site_count(result);
         bool pending_lsp_site = pp_has_pending_lsp_site(result);
+        bool unowned_c_member = pp_has_unowned_c_member(result, lang);
         bool cross_lsp_eligible =
             (rc->all_defs && rc->def_count > 0 && cbm_pxc_has_cross_lsp(lang) &&
-             (semantic_sites > 0 || pending_lsp_site) &&
-             (jvm_cross_lsp || rust_workspace_cross_lsp || pending_lsp_site ||
-              qualified_lsp_sites < semantic_sites) &&
+             (((semantic_sites > 0 || pending_lsp_site) &&
+               (jvm_cross_lsp || rust_workspace_cross_lsp || pending_lsp_site ||
+                qualified_lsp_sites < semantic_sites)) ||
+              unowned_c_member) &&
              !is_generated);
 
         /* Skip files with nothing else to resolve and no cross-LSP work. */

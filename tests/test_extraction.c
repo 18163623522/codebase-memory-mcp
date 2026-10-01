@@ -1069,6 +1069,52 @@ TEST(c_struct) {
     PASS();
 }
 
+/* `typedef struct { … } Name;` is the dominant C spelling of a type: the
+ * aggregate itself is anonymous and the typedef's declarator names it. Without
+ * that name the struct had no Class node and none of its members a Field node
+ * (37 of the 38 structs in internal/cbm/cbm.h), so a member access could only
+ * bind some OTHER struct's same-named field. */
+TEST(extract_c_anonymous_typedef_aggregate_is_named_by_its_typedef) {
+    CBMFileResult *r = extract("typedef struct {\n"
+                               "    int count;\n"
+                               "    const char *label;\n"
+                               "} Tally;\n"
+                               "\n"
+                               "typedef union {\n"
+                               "    int as_int;\n"
+                               "    float as_float;\n"
+                               "} Slot;\n"
+                               "\n"
+                               "typedef enum { SHADE_RED, SHADE_GREEN } Shade;\n"
+                               "\n"
+                               "typedef struct Named {\n"
+                               "    int id;\n"
+                               "} Named;\n"
+                               "\n"
+                               "typedef struct {\n"
+                               "    int raw;\n"
+                               "} *TallyRef;\n",
+                               CBM_LANG_C, "t", "tally.h");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    /* RED before the fix: none of the three anonymous aggregates has a def. */
+    ASSERT_TRUE(has_def(r, "Class", "Tally"));
+    ASSERT_TRUE(has_def_qn(r, "t.tally.Tally.count"));
+    ASSERT_TRUE(has_def_qn(r, "t.tally.Tally.label"));
+    ASSERT_TRUE(has_def(r, "Class", "Slot"));
+    ASSERT_TRUE(has_def_qn(r, "t.tally.Slot.as_int"));
+    ASSERT_TRUE(has_def_qn(r, "t.tally.Slot.as_float"));
+    ASSERT_TRUE(has_def_any(r, "Shade"));
+    /* A struct that names itself keeps exactly one def, under its own name. */
+    ASSERT_EQ(count_defs_named(r, "Class", "Named"), 1);
+    ASSERT_TRUE(has_def_qn(r, "t.tally.Named.id"));
+    /* A pointer typedef names a pointer type, not the aggregate: no Class. */
+    ASSERT_FALSE(has_def(r, "Class", "TallyRef"));
+    ASSERT_FALSE(has_def(r, "Field", "raw"));
+    cbm_free_result(r);
+    PASS();
+}
+
 /* return_type of the first definition named `name`; NULL when there is no such
  * definition or it carries no return type. */
 static const char *def_return_type(CBMFileResult *r, const char *name) {
@@ -8934,6 +8980,7 @@ SUITE(extraction) {
     RUN_TEST(c_function_return_type_preserves_pointer_and_qualifier);
     RUN_TEST(c_function_return_type_plain_unchanged);
     RUN_TEST(c_struct);
+    RUN_TEST(extract_c_anonymous_typedef_aggregate_is_named_by_its_typedef);
     RUN_TEST(cpp_class);
     RUN_TEST(cpp_method_return_type_preserves_pointer_and_qualifier);
 

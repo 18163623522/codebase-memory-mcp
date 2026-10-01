@@ -358,6 +358,23 @@ bool cbm_suppress_cross_language_ref(CBMLanguage caller_lang, const char *target
  * unit-tested in test_registry.c. */
 bool cbm_go_suppress_bare_field_ref(bool is_go, bool is_member_access, const char *target_label);
 
+/* What to do with a call whose registry resolution landed on a Field node.
+ * Pure; unit-tested in test_registry.c. */
+typedef enum {
+    CBM_FIELD_CALL_KEEP = 0, /* not a Field target, or a language this rule leaves alone */
+    CBM_FIELD_CALL_DROP,     /* a Field can never be this call's target */
+    CBM_FIELD_CALL_BY_OWNER, /* C/C++ member call: the object's type names the Field */
+} cbm_field_call_policy_t;
+cbm_field_call_policy_t cbm_call_onto_field_policy(CBMLanguage caller_lang, const char *callee_text,
+                                                   const char *target_label,
+                                                   const char *target_file_path);
+
+/* True when a reference is the member half of a C `a.b` / `a->b`. Such a
+ * reference binds only through the C LSP's field-owner rows (the type of `a`),
+ * never through a bare-name lookup of `b`. C only. Pure; unit-tested in
+ * test_registry.c. */
+bool cbm_c_member_binds_by_owner(bool is_c, bool is_member_access);
+
 /* Get the label of a qualified name, or NULL if not found. */
 const char *cbm_registry_label_of(const cbm_registry_t *r, const char *qn);
 

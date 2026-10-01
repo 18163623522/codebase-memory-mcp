@@ -151,6 +151,9 @@ static int resolve_usage_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *res
     cbm_pipeline_lsp_reference_index_t reference_index = {0};
     bool reference_index_ready =
         cbm_pipeline_lsp_reference_index_build(&result->resolved_calls, &reference_index);
+    cbm_pipeline_lsp_field_index_t field_index = {0};
+    bool field_index_ready =
+        cbm_pipeline_lsp_field_index_build(&result->resolved_calls, &field_index);
     for (int u = 0; u < result->usages.count; u++) {
         CBMUsage *usage = &result->usages.items[u];
         if (!usage->ref_name) {
@@ -158,6 +161,31 @@ static int resolve_usage_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *res
         }
         const cbm_gbuf_node_t *src = find_enclosing_node(ctx, usage->enclosing_func_qn, rel);
         if (!src) {
+            continue;
+        }
+
+        /* A C member name binds through the type of its object, published by
+         * the C LSP as field-owner rows, and through nothing else: the bare
+         * member name must never reach the short-name registry below. */
+        if (usage->kind == CBM_USAGE_VALUE &&
+            cbm_c_member_binds_by_owner(lang == CBM_LANG_C, usage->is_member_access)) {
+            cbm_pipeline_lsp_field_cursor_t owners = cbm_pipeline_lsp_field_cursor(
+                &result->resolved_calls, field_index_ready ? &field_index : NULL,
+                usage->enclosing_func_qn, usage->ref_name);
+            const CBMResolvedCall *owner;
+            while ((owner = cbm_pipeline_lsp_field_next(&owners)) != NULL) {
+                const cbm_gbuf_node_t *field =
+                    cbm_pipeline_lsp_field_node(ctx->gbuf, ctx->project_name, owner);
+                if (!field || field->id == src->id) {
+                    continue;
+                }
+                char member_esc[CBM_SZ_256];
+                cbm_json_escape(member_esc, sizeof(member_esc), usage->ref_name);
+                char member_props[CBM_SZ_512];
+                snprintf(member_props, sizeof(member_props), "{\"callee\":\"%s\"}", member_esc);
+                cbm_gbuf_insert_edge(ctx->gbuf, src->id, field->id, "USAGE", member_props);
+                resolved++;
+            }
             continue;
         }
 
@@ -242,6 +270,7 @@ static int resolve_usage_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *res
         resolved++;
     }
     cbm_pipeline_lsp_reference_index_free(&reference_index);
+    cbm_pipeline_lsp_field_index_free(&field_index);
     return resolved;
 }
 
@@ -284,6 +313,9 @@ static int resolve_rw_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *result
                             const char *module_qn, const char **imp_keys, const char **imp_vals,
                             int imp_count, CBMLanguage lang) {
     int resolved = 0;
+    cbm_pipeline_lsp_field_index_t field_index = {0};
+    bool field_index_ready =
+        cbm_pipeline_lsp_field_index_build(&result->resolved_calls, &field_index);
     for (int r = 0; r < result->rw.count; r++) {
         CBMReadWrite *rw = &result->rw.items[r];
         if (!rw->var_name) {
@@ -292,6 +324,25 @@ static int resolve_rw_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *result
 
         const cbm_gbuf_node_t *src = find_enclosing_node(ctx, rw->enclosing_func_qn, rel);
         if (!src) {
+            continue;
+        }
+
+        /* C member read/write: same owner join as resolve_usage_edges. */
+        if (cbm_c_member_binds_by_owner(lang == CBM_LANG_C, rw->is_member_access)) {
+            cbm_pipeline_lsp_field_cursor_t owners = cbm_pipeline_lsp_field_cursor(
+                &result->resolved_calls, field_index_ready ? &field_index : NULL,
+                rw->enclosing_func_qn, rw->var_name);
+            const CBMResolvedCall *owner;
+            while ((owner = cbm_pipeline_lsp_field_next(&owners)) != NULL) {
+                const cbm_gbuf_node_t *field =
+                    cbm_pipeline_lsp_field_node(ctx->gbuf, ctx->project_name, owner);
+                if (!field || field->id == src->id) {
+                    continue;
+                }
+                cbm_gbuf_insert_edge(ctx->gbuf, src->id, field->id,
+                                     rw->is_write ? "WRITES" : "READS", "{}");
+                resolved++;
+            }
             continue;
         }
 
@@ -320,6 +371,7 @@ static int resolve_rw_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *result
         cbm_gbuf_insert_edge(ctx->gbuf, src->id, tgt->id, edge_type, "{}");
         resolved++;
     }
+    cbm_pipeline_lsp_field_index_free(&field_index);
     return resolved;
 }
 
