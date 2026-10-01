@@ -47,6 +47,10 @@ int tf_deselected_count = 0;
 #include <fcntl.h>
 #include <sys/mman.h>
 #endif
+#ifdef CBM_TEST_COVERAGE
+#include <dlfcn.h>   /* the libc _exit behind the profile-writing one */
+#include <pthread.h> /* pthread_atfork: a forked child names its own profile */
+#endif
 #endif
 
 /* daemon_runtime places an exact copy of this runner at a private PATH entry
@@ -1206,6 +1210,59 @@ static bool tf_coverage_init(void) {
     }
     return true;
 }
+
+#ifndef _WIN32
+/* ── Children that never reach atexit ───────────────────────────────
+ * The profile runtime writes from an atexit handler, and the children that do
+ * the real work of a test do not get there. A fork that hosts a whole MCP
+ * server leaves through _exit(); the re-exec'd index worker leaves through
+ * _Exit() (tf_maybe_run_index_worker, mirroring the production worker).
+ * Measured on mcp:index_bg_paths_route_through_supervisor_issue832: neither
+ * child left a profile, and the test mapped to the 19 functions of its parent.
+ *
+ * Both functions are defined in this image, so every call in it -- a test, a
+ * runner role, product code -- writes the profile first. exit() inside libc is
+ * untouched. A child that dies by signal still leaves nothing. */
+static char tf_coverage_fork_profile[TF_COVERAGE_PATH_CAP];
+
+/* A forked child inherits the profile name of its parent and would write over
+ * it. Give it the name an exec'd child derives from LLVM_PROFILE_FILE. */
+static void tf_coverage_fork_child(void) {
+    const char *pattern = getenv("LLVM_PROFILE_FILE");
+    int length = pattern ? snprintf(tf_coverage_fork_profile, sizeof(tf_coverage_fork_profile),
+                                    "%s", pattern)
+                         : 0;
+    if (length > 0 && (size_t)length < sizeof(tf_coverage_fork_profile)) {
+        __llvm_profile_set_filename(tf_coverage_fork_profile);
+    }
+}
+
+static void tf_coverage_exit_now(int status) __attribute__((noreturn));
+static void tf_coverage_exit_now(int status) {
+    (void)__llvm_profile_write_file();
+    void (*libc_exit)(int) = (void (*)(int))dlsym(RTLD_NEXT, "_exit");
+    if (libc_exit) {
+        libc_exit(status);
+    }
+    abort();
+}
+
+void _exit(int status) {
+    tf_coverage_exit_now(status);
+}
+
+void _Exit(int status) {
+    tf_coverage_exit_now(status);
+}
+#endif /* !_WIN32 */
+
+/* Runs first in every process of this image, role children included: they
+ * fork too. Windows has neither fork nor an interposable _exit here. */
+static void tf_coverage_process_init(void) {
+#ifndef _WIN32
+    (void)pthread_atfork(NULL, NULL, tf_coverage_fork_child);
+#endif
+}
 #endif /* CBM_TEST_COVERAGE */
 
 static int g_suite_argc = 0;
@@ -1420,6 +1477,9 @@ extern void suite_dump_verify_io(void);
 extern void cbm_kind_in_set_free_cache(void);
 
 int main(int argc, char **argv) {
+#ifdef CBM_TEST_COVERAGE
+    tf_coverage_process_init();
+#endif
     int memory_limit_probe_rc = tf_maybe_run_windows_memory_limit_probe(argc, argv);
     if (memory_limit_probe_rc >= 0) {
         return memory_limit_probe_rc;
