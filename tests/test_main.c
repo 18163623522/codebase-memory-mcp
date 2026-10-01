@@ -7,6 +7,7 @@
 int tf_pass_count = 0;
 int tf_fail_count = 0;
 int tf_skip_count = 0;
+int tf_deselected_count = 0;
 
 #include "test_framework.h"
 #include "test_helpers.h"
@@ -27,6 +28,7 @@ int tf_skip_count = 0;
 #include "ui/http_server.h"        /* deleted-self executable probe */
 #include "result_spill.h"          /* pinned free disk: spill verdicts ignore the host disk */
 #include <sqlite3.h>
+#include <ctype.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -821,11 +823,401 @@ static int tf_maybe_run_deleted_self_probe(int argc, char **argv) {
 #endif
 }
 
+/* ── Per-test selection: CBM_TEST_ONLY / CBM_TEST_ONLY_FILE ──────────
+ * The test-impact selector names tests as `suite:test` tokens: comma-separated
+ * in CBM_TEST_ONLY, one per line (blank lines and # comments allowed) in the
+ * file CBM_TEST_ONLY_FILE names. Both may be set; the selection is their union.
+ * Argv keeps selecting suites and the tokens narrow inside that selection, so
+ * the parallel harness can hand every per-suite process the same list.
+ *
+ * Tokens are strict. After the run, one that names a suite this build does not
+ * register, or a test its suite never ran, fails the run by name: a selection
+ * that quietly ran less than it named would be a green for work never done. A
+ * token for a registered suite that argv left out belongs to another process
+ * and is not this one to judge. */
+typedef enum {
+    TF_ONLY_UNSEEN = 0, /* no registered suite carries the suite name */
+    TF_ONLY_REGISTERED, /* the suite exists; argv did not ask this process for it */
+    TF_ONLY_ENTERED,    /* the suite ran and no RUN_TEST carried the test name */
+    TF_ONLY_MATCHED,
+} tf_only_state_t;
+
+typedef struct {
+    char *suite; /* one allocation holding "suite\0test" */
+    const char *test;
+    tf_only_state_t state;
+} tf_only_token_t;
+
+static tf_only_token_t *tf_only_tokens = NULL;
+static size_t tf_only_count = 0;
+static size_t tf_only_cap = 0;
+static bool tf_only_active = false;
+/* Tokens are sorted by suite, so the running suite has one run [first, end). */
+static size_t tf_only_suite_first = 0;
+static size_t tf_only_suite_end = 0;
+
+const char *tf_current_suite = NULL;
+
+static bool tf_only_name_valid(const char *name, size_t length) {
+    for (size_t i = 0; i < length; i++) {
+        if (!isalnum((unsigned char)name[i]) && name[i] != '_') {
+            return false;
+        }
+    }
+    return length > 0;
+}
+
+/* Adds the token in text[0..length). Surrounding whitespace is not part of it
+ * (the CR of a CRLF file included), and an empty span is not a token. */
+static bool tf_only_add(const char *text, size_t length) {
+    while (length > 0 && isspace((unsigned char)text[0])) {
+        text++;
+        length--;
+    }
+    while (length > 0 && isspace((unsigned char)text[length - 1])) {
+        length--;
+    }
+    if (length == 0) {
+        return true;
+    }
+    /* No test or suite name comes near this; it also bounds the copy below. */
+    const char *colon = length < CBM_SZ_512 ? memchr(text, ':', length) : NULL;
+    size_t suite_length = colon ? (size_t)(colon - text) : 0;
+    if (!colon || !tf_only_name_valid(text, suite_length) ||
+        !tf_only_name_valid(colon + 1, length - suite_length - 1)) {
+        fprintf(stderr, "malformed test selection token: %.*s (expected suite:test)\n", (int)length,
+                text);
+        return false;
+    }
+    if (tf_only_count == tf_only_cap) {
+        size_t cap = tf_only_cap ? tf_only_cap * 2 : CBM_SZ_64;
+        tf_only_token_t *grown = realloc(tf_only_tokens, cap * sizeof(*grown));
+        if (!grown) {
+            fprintf(stderr, "Failed to allocate the test selection\n");
+            return false;
+        }
+        tf_only_tokens = grown;
+        tf_only_cap = cap;
+    }
+    char *copy = malloc(length + 1);
+    if (!copy) {
+        fprintf(stderr, "Failed to allocate the test selection\n");
+        return false;
+    }
+    memcpy(copy, text, length);
+    copy[suite_length] = '\0';
+    copy[length] = '\0';
+    tf_only_tokens[tf_only_count++] =
+        (tf_only_token_t){.suite = copy, .test = copy + suite_length + 1, .state = TF_ONLY_UNSEEN};
+    return true;
+}
+
+static bool tf_only_add_list(const char *list) {
+    for (const char *cursor = list;;) {
+        const char *comma = strchr(cursor, ',');
+        if (!tf_only_add(cursor, comma ? (size_t)(comma - cursor) : strlen(cursor))) {
+            return false;
+        }
+        if (!comma) {
+            return true;
+        }
+        cursor = comma + 1;
+    }
+}
+
+static bool tf_only_add_file(const char *path) {
+    FILE *file = cbm_fopen(path, "r");
+    if (!file) {
+        fprintf(stderr, "cannot read test selection file: %s\n", path);
+        return false;
+    }
+    char line[CBM_SZ_1K];
+    bool ok = true;
+    while (ok && fgets(line, sizeof(line), file)) {
+        size_t length = strlen(line);
+        if (length == sizeof(line) - 1 && line[length - 1] != '\n') {
+            /* The rest of the line would be read back as a token of its own. */
+            fprintf(stderr, "test selection file line too long: %s\n", path);
+            ok = false;
+        } else {
+            ok = tf_only_add(line, strcspn(line, "#\n"));
+        }
+    }
+    if (ok && ferror(file)) {
+        fprintf(stderr, "cannot read test selection file: %s\n", path);
+        ok = false;
+    }
+    (void)fclose(file);
+    return ok;
+}
+
+static int tf_only_compare(const void *left, const void *right) {
+    const tf_only_token_t *a = left;
+    const tf_only_token_t *b = right;
+    int by_suite = strcmp(a->suite, b->suite);
+    return by_suite != 0 ? by_suite : strcmp(a->test, b->test);
+}
+
+static void tf_only_free(void) {
+    for (size_t i = 0; i < tf_only_count; i++) {
+        free(tf_only_tokens[i].suite);
+    }
+    free(tf_only_tokens);
+    tf_only_tokens = NULL;
+    tf_only_count = 0;
+    tf_only_cap = 0;
+    tf_only_active = false;
+}
+
+/* Reads the selection once. False means the selection itself is unusable: the
+ * caller stops before any suite, because falling back to "everything" or to
+ * "nothing" would decide a gate by accident. An empty variable is unset, as it
+ * is in a shell; a selection that is set and names no test is an error, since
+ * a caller who wants every test leaves both variables unset. */
+static bool tf_only_init(void) {
+    const char *list = getenv("CBM_TEST_ONLY");
+    const char *path = getenv("CBM_TEST_ONLY_FILE");
+    bool has_list = list && list[0];
+    bool has_path = path && path[0];
+    if (!has_list && !has_path) {
+        return true;
+    }
+    if ((has_list && !tf_only_add_list(list)) || (has_path && !tf_only_add_file(path))) {
+        return false;
+    }
+    if (tf_only_count == 0) {
+        fprintf(stderr, "test selection names no test (CBM_TEST_ONLY, CBM_TEST_ONLY_FILE)\n");
+        return false;
+    }
+    qsort(tf_only_tokens, tf_only_count, sizeof(*tf_only_tokens), tf_only_compare);
+    tf_only_active = true;
+    return true;
+}
+
+/* Returns the first token of `suite` and stores one past its last. */
+static size_t tf_only_suite_run(const char *suite, size_t *end_out) {
+    size_t first = 0;
+    while (first < tf_only_count && strcmp(tf_only_tokens[first].suite, suite) != 0) {
+        first++;
+    }
+    size_t end = first;
+    while (end < tf_only_count && strcmp(tf_only_tokens[end].suite, suite) == 0) {
+        end++;
+    }
+    *end_out = end;
+    return first;
+}
+
+static void tf_only_raise(size_t first, size_t end, tf_only_state_t state) {
+    for (size_t i = first; i < end; i++) {
+        if (tf_only_tokens[i].state < state) {
+            tf_only_tokens[i].state = state;
+        }
+    }
+}
+
+bool tf_suite_enter(const char *suite) {
+    if (tf_current_suite) {
+        /* A suite run from inside another: its tests belong to the registered
+         * suite that runs it, which is the name a token and argv both use. */
+        return true;
+    }
+    if (tf_only_active) {
+        tf_only_suite_first = tf_only_suite_run(suite, &tf_only_suite_end);
+        if (tf_only_suite_first == tf_only_suite_end) {
+            return false; /* no token names it: its body, setup included, never runs */
+        }
+        tf_only_raise(tf_only_suite_first, tf_only_suite_end, TF_ONLY_ENTERED);
+    }
+    tf_current_suite = suite;
+    return true;
+}
+
+void tf_suite_leave(const char *suite) {
+    if (tf_current_suite && strcmp(tf_current_suite, suite) == 0) {
+        tf_current_suite = NULL;
+        tf_only_suite_first = 0;
+        tf_only_suite_end = 0;
+    }
+}
+
+bool tf_test_selected(const char *test) {
+    if (!tf_only_active) {
+        return true;
+    }
+    bool selected = false;
+    for (size_t i = tf_only_suite_first; i < tf_only_suite_end; i++) {
+        if (strcmp(tf_only_tokens[i].test, test) == 0) {
+            tf_only_tokens[i].state = TF_ONLY_MATCHED;
+            selected = true;
+        }
+    }
+    if (!selected) {
+        tf_deselected_count++;
+    }
+    return selected;
+}
+
+/* The strict half of the selection: every token this process was responsible
+ * for must have run a test. Each one that did not is a failure of the run. */
+static void tf_only_report_unmatched(void) {
+    for (size_t i = 0; i < tf_only_count; i++) {
+        const tf_only_token_t *token = &tf_only_tokens[i];
+        if (token->state != TF_ONLY_UNSEEN && token->state != TF_ONLY_ENTERED) {
+            continue;
+        }
+        if (i > 0 && tf_only_compare(token, &tf_only_tokens[i - 1]) == 0) {
+            continue; /* named twice, reported once */
+        }
+        fprintf(stderr, "selected test not compiled into this build or unknown: %s:%s\n",
+                token->suite, token->test);
+        tf_fail_count++;
+    }
+}
+
+#ifdef CBM_TEST_COVERAGE
+/* ── Per-test coverage profiles ──────────────────────────────────────
+ * Compiled only into the instrumented runner (make test-runner-cov: clang
+ * source coverage, no sanitizer). With CBM_TEST_COVERAGE_DIR set, every test
+ * leaves its own raw profiles under <dir>/<suite>/:
+ *   <test>.parent.profraw       what this process executed inside the test
+ *   <test>.<pid>.profraw        one per child the test spawned. Children
+ *                               inherit LLVM_PROFILE_FILE, so a re-exec of this
+ *                               runner or a product binary names its own file
+ *   _setup.<n>.profraw          what ran between tests: suite setup, and the
+ *                               prologue and epilogue of the runner itself
+ *   _setup.child.<pid>.profraw  children spawned between tests
+ * The first two are the coverage of the test; the others belong to no test. */
+void __llvm_profile_set_filename(const char *pattern);
+int __llvm_profile_write_file(void);
+void __llvm_profile_reset_counters(void);
+
+enum { TF_COVERAGE_PATH_CAP = CBM_SZ_4K + CBM_SZ_1K };
+static char tf_coverage_dir[CBM_SZ_4K]; /* canonical; empty = not a coverage run */
+/* The runtime keeps the pointer it is handed, not a copy: these outlive it. */
+static char tf_coverage_profile[TF_COVERAGE_PATH_CAP];
+static char tf_coverage_child_pattern[TF_COVERAGE_PATH_CAP];
+static unsigned int tf_coverage_setup_index = 0;
+
+/* Names the profile this process writes next and the one its children will. */
+static bool tf_coverage_route(const char *directory, const char *own, const char *child) {
+    int own_length =
+        snprintf(tf_coverage_profile, sizeof(tf_coverage_profile), "%s/%s.profraw", directory, own);
+    int child_length = snprintf(tf_coverage_child_pattern, sizeof(tf_coverage_child_pattern),
+                                "%s/%s.%%p.profraw", directory, child);
+    if (own_length <= 0 || (size_t)own_length >= sizeof(tf_coverage_profile) || child_length <= 0 ||
+        (size_t)child_length >= sizeof(tf_coverage_child_pattern)) {
+        return false;
+    }
+    __llvm_profile_set_filename(tf_coverage_profile);
+    return cbm_setenv("LLVM_PROFILE_FILE", tf_coverage_child_pattern, 1) == 0;
+}
+
+/* Between tests the interval is suite setup, and so is any child it spawns. */
+static bool tf_coverage_route_setup(const char *suite_dir) {
+    char own[CBM_SZ_64];
+    (void)snprintf(own, sizeof(own), "_setup.%u", tf_coverage_setup_index);
+    return tf_coverage_route(suite_dir, own, "_setup.child");
+}
+
+/* Writes what this process executed since the last write to its current profile
+ * and restarts the counters, so every file holds exactly one interval. */
+static void tf_coverage_flush(void) {
+    (void)__llvm_profile_write_file();
+    __llvm_profile_reset_counters();
+}
+
+static bool tf_coverage_suite_dir(char *out, size_t cap) {
+    int length = snprintf(out, cap, "%s/%s", tf_coverage_dir,
+                          tf_current_suite ? tf_current_suite : "_nosuite");
+    return length > 0 && (size_t)length < cap && cbm_mkdir_p(out, 0755);
+}
+
+/* A coverage run that loses a profile would report the test as executing
+ * nothing, and the impact map would trust that: fail the run instead. */
+static void tf_coverage_lost(const char *test) {
+    fprintf(stderr, "coverage profile could not be routed: %s:%s\n",
+            tf_current_suite ? tf_current_suite : "_nosuite", test);
+    tf_fail_count++;
+}
+
+void tf_coverage_test_begin(const char *test) {
+    char suite_dir[TF_COVERAGE_PATH_CAP];
+    char own[CBM_SZ_512];
+    if (!tf_coverage_dir[0]) {
+        return;
+    }
+    int own_length = snprintf(own, sizeof(own), "%s.parent", test);
+    if (own_length <= 0 || (size_t)own_length >= sizeof(own) ||
+        !tf_coverage_suite_dir(suite_dir, sizeof(suite_dir)) ||
+        !tf_coverage_route_setup(suite_dir)) {
+        tf_coverage_lost(test);
+        return;
+    }
+    tf_coverage_flush();
+    tf_coverage_setup_index++;
+    /* Named before the test runs, not after: a forked child that leaves through
+     * exit() writes to the name it inherited, which must not be the setup file. */
+    if (!tf_coverage_route(suite_dir, own, test)) {
+        tf_coverage_lost(test);
+    }
+}
+
+void tf_coverage_test_end(const char *test) {
+    char suite_dir[TF_COVERAGE_PATH_CAP];
+    char own[CBM_SZ_512];
+    if (!tf_coverage_dir[0]) {
+        return;
+    }
+    int own_length = snprintf(own, sizeof(own), "%s.parent", test);
+    if (own_length <= 0 || (size_t)own_length >= sizeof(own) ||
+        !tf_coverage_suite_dir(suite_dir, sizeof(suite_dir)) ||
+        !tf_coverage_route(suite_dir, own, test)) {
+        tf_coverage_lost(test);
+        return;
+    }
+    tf_coverage_flush();
+    /* The runtime writes once more at exit, to whatever name is current. Left
+     * on the file of this test, that write would replace the profile just
+     * taken with the teardown that follows it. */
+    if (!tf_coverage_route_setup(suite_dir)) {
+        tf_coverage_lost(test);
+    }
+}
+
+/* False when the run asked for coverage and cannot have it. Children run in
+ * other working directories, so they are handed an absolute name. */
+static bool tf_coverage_init(void) {
+    const char *dir = getenv("CBM_TEST_COVERAGE_DIR");
+    if (!dir || !dir[0]) {
+        return true;
+    }
+    if (!cbm_mkdir_p(dir, 0755) ||
+        !cbm_canonical_path(dir, tf_coverage_dir, sizeof(tf_coverage_dir))) {
+        tf_coverage_dir[0] = '\0';
+        fprintf(stderr, "cannot use coverage directory: %s\n", dir);
+        return false;
+    }
+    /* Routing sets the environment, which may move what `dir` points at. */
+    if (!tf_coverage_route(tf_coverage_dir, "_runner.%p", "_runner.child")) {
+        fprintf(stderr, "cannot route coverage profiles under: %s\n", tf_coverage_dir);
+        tf_coverage_dir[0] = '\0';
+        return false;
+    }
+    return true;
+}
+#endif /* CBM_TEST_COVERAGE */
+
 static int g_suite_argc = 0;
 static char **g_suite_argv = NULL;
 static bool *g_suite_arg_matched = NULL;
 
 static bool suite_requested(const char *name) {
+    /* Every registered suite passes through here, requested or not: this is
+     * where a selection token learns that its suite exists in this build. */
+    size_t token_end = 0;
+    size_t token_first = tf_only_suite_run(name, &token_end);
+    tf_only_raise(token_first, token_end, TF_ONLY_REGISTERED);
     if (g_suite_argc <= 1) {
         return true;
     }
@@ -1173,6 +1565,16 @@ int main(int argc, char **argv) {
         g_suite_argc = argc;
         g_suite_argv = argv;
     }
+    if (!g_list_only && !tf_only_init()) {
+        tf_only_free();
+        return 2;
+    }
+#ifdef CBM_TEST_COVERAGE
+    if (!g_list_only && !tf_coverage_init()) {
+        tf_only_free();
+        return 2;
+    }
+#endif
     if (g_suite_argc > 1) {
         g_suite_arg_matched = calloc((size_t)argc, sizeof(*g_suite_arg_matched));
         if (!g_suite_arg_matched) {
@@ -1417,6 +1819,8 @@ int main(int argc, char **argv) {
     if (g_suite_argc > 1 && !any_suite_matched) {
         fprintf(stderr, "No matching test suites requested\n");
     }
+    tf_only_report_unmatched();
+    tf_only_free();
     free(g_suite_arg_matched);
     g_suite_arg_matched = NULL;
 

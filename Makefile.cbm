@@ -71,13 +71,29 @@ ifeq ($(TEST_SEAMS),1)
 TEST_SEAM_DEFINE := -DCBM_ENABLE_TEST_SEAMS=1
 endif
 
+# Per-test coverage for the test-impact map. TEST_COVERAGE=1 compiles clang
+# source coverage into OUR code only -- the one-shot sources, the LSP unity
+# object and the preprocessor -- in the test runner and in the product binary,
+# and turns on the runner's per-test profile hooks (tests/test_framework.h).
+# Vendored objects stay uninstrumented: a vendored change selects tests by rule,
+# and every counter compiled in is written out again for every test. Like every
+# other flavour it needs its own BUILD_DIR; the test-runner-cov and cbm-cov
+# targets pin one.
+TEST_COVERAGE ?= 0
+TEST_COVERAGE_FLAGS :=
+TEST_COVERAGE_DEFINE :=
+ifeq ($(TEST_COVERAGE),1)
+TEST_COVERAGE_FLAGS := -fprofile-instr-generate -fcoverage-mapping
+TEST_COVERAGE_DEFINE := -DCBM_TEST_COVERAGE=1
+endif
+
 # Production flags (CFLAGS_EXTRA allows CI to inject -DCBM_VERSION)
 # CBM_BIND_TS_ALLOCATOR=1: bind the tree-sitter runtime to mimalloc (#424). Only
 # the prod build uses mimalloc (MI_OVERRIDE=1); the test build is CRT+ASan, where
 # binding would create an alloc/free mismatch, so the guard is prod-only.
 CFLAGS_PROD = $(CFLAGS_COMMON) -O2 -DCBM_BIND_TS_ALLOCATOR=1 $(TEST_SEAM_DEFINE) \
-              $(GLOBAL_OVERRIDE_DEFINE) $(MEMWASTE_CFLAGS) $(CFLAGS_EXTRA)
-CXXFLAGS_PROD = $(CXXFLAGS_COMMON) -O2 $(MEMWASTE_VENDOR_CFLAGS)
+              $(GLOBAL_OVERRIDE_DEFINE) $(MEMWASTE_CFLAGS) $(TEST_COVERAGE_FLAGS) $(CFLAGS_EXTRA)
+CXXFLAGS_PROD = $(CXXFLAGS_COMMON) -O2 $(MEMWASTE_VENDOR_CFLAGS) $(TEST_COVERAGE_FLAGS)
 
 # Test flags: debug + sanitizers (override SANITIZE= to disable on Windows)
 SANITIZE = -fsanitize=address,undefined -fno-omit-frame-pointer
@@ -102,8 +118,10 @@ INCREMENTAL_TEST_DEFINE = -DCBM_INCREMENTAL_TEST_API=1
 COVERAGE_MARKER_TEST_DEFINE = -DCBM_COVERAGE_MARKER_TEST_API=1
 CFLAGS_TEST = $(CFLAGS_COMMON) $(EDITOR_TEST_DEFINES) $(SANITIZED_DEFINE) \
 	$(KOTLIN_DEDUP_TEST_DEFINE) $(CALL_REFERENCE_LOOKUP_TEST_DEFINE) \
-	$(INCREMENTAL_TEST_DEFINE) $(COVERAGE_MARKER_TEST_DEFINE) -g -O1 $(SANITIZE)
-CXXFLAGS_TEST = $(CXXFLAGS_COMMON) $(SANITIZED_DEFINE) -g -O1 $(SANITIZE) $(CXX_STDLIB_FLAGS)
+	$(INCREMENTAL_TEST_DEFINE) $(COVERAGE_MARKER_TEST_DEFINE) $(TEST_COVERAGE_DEFINE) \
+	-g -O1 $(SANITIZE) $(TEST_COVERAGE_FLAGS)
+CXXFLAGS_TEST = $(CXXFLAGS_COMMON) $(SANITIZED_DEFINE) -g -O1 $(SANITIZE) $(TEST_COVERAGE_FLAGS) \
+	$(CXX_STDLIB_FLAGS)
 
 # TSan (can't combine with ASan)
 TSAN_SANITIZE = -fsanitize=thread -fno-omit-frame-pointer
@@ -851,7 +869,7 @@ PP_OBJ_TSAN = $(BUILD_DIR)/tsan_preprocessor.o
 
 # ── Targets ──────────────────────────────────────────────────────
 
-.PHONY: test test-par test-repro test-foundation test-tsan test-daemon-smoke cbm cbm-with-ui frontend embed clean-c lint lint-tidy lint-tidy-diff lint-cppcheck lint-format security fuzz
+.PHONY: test test-par test-repro test-foundation test-tsan test-daemon-smoke test-runner-cov cbm-cov cbm cbm-with-ui frontend embed clean-c lint lint-tidy lint-tidy-diff lint-cppcheck lint-format security fuzz
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -890,7 +908,7 @@ $(BUILD_DIR)/ts_runtime.o: $(TS_RUNTIME_DEPS) | $(BUILD_DIR)
 	$(CC) $(GRAMMAR_CFLAGS_TEST) -c -o $@ $<
 
 $(BUILD_DIR)/lsp_all.o: $(LSP_UNITY_DEPS) | $(BUILD_DIR)
-	$(CC) $(GRAMMAR_CFLAGS_TEST) $(SANITIZE) -c -o $@ $<
+	$(CC) $(GRAMMAR_CFLAGS_TEST) $(SANITIZE) $(TEST_COVERAGE_FLAGS) -c -o $@ $<
 
 $(BUILD_DIR)/preprocessor.o: $(CBM_DIR)/preprocessor.cpp | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS_TEST) -w -I$(CBM_DIR)/vendored -c -o $@ $<
@@ -1132,7 +1150,7 @@ $(BUILD_DIR)/prod_ts_runtime.o: $(TS_RUNTIME_DEPS) | $(BUILD_DIR)
 	$(CC) $(GRAMMAR_CFLAGS) -c -o $@ $<
 
 $(BUILD_DIR)/prod_lsp_all.o: $(LSP_UNITY_DEPS) | $(BUILD_DIR)
-	$(CC) $(GRAMMAR_CFLAGS) -c -o $@ $<
+	$(CC) $(GRAMMAR_CFLAGS) $(TEST_COVERAGE_FLAGS) -c -o $@ $<
 
 $(BUILD_DIR)/prod_preprocessor.o: $(CBM_DIR)/preprocessor.cpp | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS_PROD) -w -I$(CBM_DIR)/vendored -c -o $@ $<
@@ -1169,7 +1187,7 @@ MAIN_SRC = src/main.c
 # for trap debugging -- silently re-run the previously instrumented binary,
 # which during this bisect produced a "crashes without sanitizers too" result
 # that was pure artifact and sent the investigation down the wrong path.
-BUILD_CONFIG_SIG := TEST_SEAMS=$(TEST_SEAMS)|CFLAGS_EXTRA=$(CFLAGS_EXTRA)|SANITIZE=$(SANITIZE)|MEMWASTE=$(MEMWASTE)|MEMWASTE_ACCESS=$(MEMWASTE_ACCESS)|MEMWASTE_PROFILE=$(MEMWASTE_PROFILE)
+BUILD_CONFIG_SIG := TEST_SEAMS=$(TEST_SEAMS)|CFLAGS_EXTRA=$(CFLAGS_EXTRA)|SANITIZE=$(SANITIZE)|MEMWASTE=$(MEMWASTE)|MEMWASTE_ACCESS=$(MEMWASTE_ACCESS)|MEMWASTE_PROFILE=$(MEMWASTE_PROFILE)|TEST_COVERAGE=$(TEST_COVERAGE)
 .PHONY: build-config-check
 build-config-check:
 $(BUILD_DIR)/.build-config: build-config-check | $(BUILD_DIR)
@@ -1364,6 +1382,30 @@ test-lsan:
 		CC=$(LSAN_LLVM_BIN)/clang CXX=$(LSAN_LLVM_BIN)/clang++ BUILD_DIR=build/lsan
 	cd $(CURDIR) && ASAN_OPTIONS="detect_leaks=1:halt_on_error=1" \
 		./build/lsan/test-runner $(LSAN_SUITES)
+
+# ── Per-test coverage build (test-impact map) ───────────────────
+# The instrumented runner and product binary (TEST_COVERAGE=1 above), in their
+# own build directory. Homebrew LLVM rather than Apple clang: the raw profile
+# format is versioned with the compiler, so llvm-profdata and llvm-cov have to
+# come from the toolchain that built the binary.
+#   LLVM_PROFILE_FILE=/dev/null CBM_TEST_COVERAGE_DIR=<dir> \
+#       build/cov/test-runner [suite...]
+# leaves one profile set per test (tests/test_main.c). The runner names every
+# profile itself, but the profile runtime creates its default file before main
+# runs: started without LLVM_PROFILE_FILE it leaves an empty default.profraw in
+# the working directory.
+# No C suite runs the product binary -- they re-exec the runner itself. The
+# shell process regressions do, and they find the instrumented one the way they
+# find any other: CBM_TEST_BINARY=build/cov/codebase-memory-mcp, with
+# LLVM_PROFILE_FILE set by whoever collects the profiles.
+COV_LLVM_BIN ?= /opt/homebrew/opt/llvm/bin
+COV_BUILD_DIR ?= build/cov
+COV_MAKE = $(MAKE) -f Makefile.cbm CC=$(COV_LLVM_BIN)/clang CXX=$(COV_LLVM_BIN)/clang++ \
+	BUILD_DIR=$(COV_BUILD_DIR) SANITIZE= TEST_COVERAGE=1
+test-runner-cov:
+	$(COV_MAKE) $(COV_BUILD_DIR)/test-runner
+cbm-cov:
+	$(COV_MAKE) $(COV_BUILD_DIR)/codebase-memory-mcp TEST_SEAMS=1
 
 # ── Coverage-guided fuzzing (libFuzzer) ─────────────────────────
 # One binary, three targets (tests/fuzz/cbm_fuzz.c): the per-file extractor,

@@ -381,6 +381,15 @@ BUILD_DIR="$BUILD_DIR" scripts/clean.sh
 # CBM_TEST_SEQUENTIAL=1 restores the single-process runner.
 make -j"$NPROC" -f Makefile.cbm "$BUILD_DIR/test-runner" ${MAKE_ARGS[@]+"${MAKE_ARGS[@]}"}
 assert_test_runner_build_config "$BUILD_DIR/test-runner" "$EXPECTED_SANITIZED"
+
+# Step 2b: per-test selection process regression. CBM_TEST_ONLY must run exactly
+# the tests it names and fail on a token that matches nothing; a suite cannot
+# assert that about the runner executing it. Runs against the runner just built
+# and BEFORE the suites: it takes seconds, and a selection that silently drops
+# tests is a property of the harness every later result depends on.
+echo "=== Step 2b: per-test selection regression (CBM_TEST_ONLY) ==="
+CBM_TEST_RUNNER="$ROOT/$BUILD_DIR/test-runner" bash "$ROOT/tests/test_harness_test_only.sh"
+
 if [ "${CBM_TEST_SEQUENTIAL:-0}" = "1" ]; then
     make -f Makefile.cbm test ${MAKE_ARGS[@]+"${MAKE_ARGS[@]}"}
 else
