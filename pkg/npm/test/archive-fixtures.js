@@ -5,6 +5,19 @@ const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
+// The npm wrapper takes the zip path whenever Node reports win32 (see
+// getPlatform and `ext` in install.js), so the tar path is unreachable on a
+// Windows host and the tar cases would test nothing a user can reach there.
+// They cannot even build their fixtures on the Windows runner: the first
+// `tar` on its PATH is Git for Windows' GNU tar, which reads a drive-letter
+// path such as C:\... as a remote host ("tar (child): Cannot connect to C:
+// resolve failed"; every tar case failed that way in the first Windows run),
+// while Windows' own bsdtar accepts it. Under WSL Node is a Linux binary,
+// takes the tar path with POSIX paths, and these cases run there.
+const TAR_PATH_SKIP = process.platform === 'win32'
+  ? 'the npm wrapper never takes the tar path on win32 (it installs the zip asset)'
+  : false;
+
 // Deterministic, poorly compressible bytes (xorshift32), so a fixture of a
 // few hundred KiB still spans several pipe chunks after gzip.
 function patternBytes(length, seed = 0x9e3779b9) {
@@ -110,4 +123,4 @@ function buildZip(entries) {
   return Buffer.concat([...locals, directory, end]);
 }
 
-module.exports = { buildZip, patternBytes, writeTarGz };
+module.exports = { TAR_PATH_SKIP, buildZip, patternBytes, writeTarGz };

@@ -13,7 +13,7 @@ const {
   installWindowsBinaryAtomically,
   validateExactTarMemberListing,
 } = require('../install.js');
-const { writeTarGz } = require('./archive-fixtures.js');
+const { TAR_PATH_SKIP, writeTarGz } = require('./archive-fixtures.js');
 
 function exactUnixListing(extra = []) {
   return [...UNIX_ARCHIVE_NAMES, ...extra].join('\n') + '\n';
@@ -34,7 +34,7 @@ test('Unix archive validation rejects traversal and unexpected members', () => {
   );
 });
 
-test('Unix extraction lists through the system tar and writes only the root executable', async () => {
+test('Unix extraction lists through the system tar and writes only the root executable', { skip: TAR_PATH_SKIP }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cbm-npm-extract-test-'));
   try {
     const archive = writeTarGz(

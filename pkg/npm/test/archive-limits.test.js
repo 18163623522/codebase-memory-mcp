@@ -17,7 +17,9 @@ const {
   extractExactTarArchive,
   extractZipOnWindows,
 } = require('../install.js');
-const { buildZip, patternBytes, writeTarGz } = require('./archive-fixtures.js');
+const {
+  TAR_PATH_SKIP, buildZip, patternBytes, writeTarGz,
+} = require('./archive-fixtures.js');
 
 const EXECUTABLE = 'codebase-memory-mcp';
 // Spans several pipe chunks, so an over-limit member is cut off mid-stream.
@@ -63,7 +65,7 @@ function neverLists() {
   throw new Error('the listing must not run');
 }
 
-test('tar extraction refuses an archive larger than the compressed limit', () =>
+test('tar extraction refuses an archive larger than the compressed limit', { skip: TAR_PATH_SKIP }, () =>
   withScratch(async (root) => {
     const archive = writeTarGz(root, 'release.tar.gz', releaseEntries(UNIX_ARCHIVE_NAMES));
     const destination = makeDestination(root);
@@ -78,7 +80,7 @@ test('tar extraction refuses an archive larger than the compressed limit', () =>
     assert.deepEqual(fs.readdirSync(destination), []);
   }));
 
-test('tar extraction refuses an exact namespace wider than the member limit', () =>
+test('tar extraction refuses an exact namespace wider than the member limit', { skip: TAR_PATH_SKIP }, () =>
   withScratch(async (root) => {
     const archive = writeTarGz(root, 'release.tar.gz', releaseEntries(UNIX_ARCHIVE_NAMES));
     const destination = makeDestination(root);
@@ -93,7 +95,7 @@ test('tar extraction refuses an exact namespace wider than the member limit', ()
     assert.deepEqual(fs.readdirSync(destination), []);
   }));
 
-test('tar extraction stops an over-limit member in the counted writer and leaves no file', () =>
+test('tar extraction stops an over-limit member in the counted writer and leaves no file', { skip: TAR_PATH_SKIP }, () =>
   withScratch(async (root) => {
     const archive = writeTarGz(
       root, 'release.tar.gz', releaseEntries(UNIX_ARCHIVE_NAMES, LARGE_EXECUTABLE),
@@ -112,7 +114,7 @@ test('tar extraction stops an over-limit member in the counted writer and leaves
     assert.deepEqual(fs.readdirSync(destination), []);
   }));
 
-test('tar extraction leaves a pre-existing target untouched', () =>
+test('tar extraction leaves a pre-existing target untouched', { skip: TAR_PATH_SKIP }, () =>
   withScratch(async (root) => {
     const archive = writeTarGz(root, 'release.tar.gz', releaseEntries(UNIX_ARCHIVE_NAMES));
     const destination = makeDestination(root);
@@ -126,7 +128,7 @@ test('tar extraction leaves a pre-existing target untouched', () =>
     assert.equal(fs.readFileSync(target, 'utf8'), 'keep');
   }));
 
-test('tar extraction leaves no file when tar fails mid-stream', () =>
+test('tar extraction leaves no file when tar fails mid-stream', { skip: TAR_PATH_SKIP }, () =>
   withScratch(async (root) => {
     const complete = writeTarGz(
       root, 'complete.tar.gz', releaseEntries(UNIX_ARCHIVE_NAMES, LARGE_EXECUTABLE),
@@ -147,7 +149,7 @@ test('tar extraction leaves no file when tar fails mid-stream', () =>
     assert.deepEqual(fs.readdirSync(destination), []);
   }));
 
-test('tar extraction rejects an empty executable', () =>
+test('tar extraction rejects an empty executable', { skip: TAR_PATH_SKIP }, () =>
   withScratch(async (root) => {
     const archive = writeTarGz(
       root, 'release.tar.gz', releaseEntries(UNIX_ARCHIVE_NAMES, Buffer.alloc(0)),
@@ -161,7 +163,7 @@ test('tar extraction rejects an empty executable', () =>
     assert.deepEqual(fs.readdirSync(destination), []);
   }));
 
-test('tar extraction installs the executable byte-identical with the executable bit set', () =>
+test('tar extraction installs the executable byte-identical with the executable bit set', { skip: TAR_PATH_SKIP }, () =>
   withScratch(async (root) => {
     const archive = writeTarGz(
       root, 'release.tar.gz', releaseEntries(UNIX_ARCHIVE_NAMES, LARGE_EXECUTABLE),
