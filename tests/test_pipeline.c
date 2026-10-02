@@ -8166,6 +8166,98 @@ static void teardown_usages_repo(void) {
     g_usages_tmpdir[0] = '\0';
 }
 
+/* #1277: typed instance fields of a Python class imported from another file.
+ * Counts CALLS edges caller -> callee (QN suffixes) whose properties name an
+ * LSP strategy. */
+static int count_lsp_calls(cbm_store_t *s, const char *project, const char *caller_suffix,
+                           const char *callee_suffix) {
+    cbm_edge_t *edges = NULL;
+    int edge_count = 0;
+    cbm_store_find_edges_by_type(s, project, "CALLS", &edges, &edge_count);
+    int hits = 0;
+    for (int i = 0; i < edge_count; i++) {
+        cbm_node_t src = {0};
+        cbm_node_t tgt = {0};
+        if (cbm_store_find_node_by_id(s, edges[i].source_id, &src) == CBM_STORE_OK &&
+            cbm_store_find_node_by_id(s, edges[i].target_id, &tgt) == CBM_STORE_OK) {
+            size_t sl = strlen(src.qualified_name);
+            size_t tl = strlen(tgt.qualified_name);
+            size_t cs = strlen(caller_suffix);
+            size_t ts = strlen(callee_suffix);
+            if (sl >= cs && tl >= ts && strcmp(src.qualified_name + sl - cs, caller_suffix) == 0 &&
+                strcmp(tgt.qualified_name + tl - ts, callee_suffix) == 0 &&
+                edges[i].properties_json && strstr(edges[i].properties_json, "lsp")) {
+                hits++;
+            }
+        }
+        cbm_node_free_fields(&src);
+        cbm_node_free_fields(&tgt);
+    }
+    if (edges)
+        cbm_store_free_edges(edges, edge_count);
+    return hits;
+}
+
+TEST(python_crossfile_typed_field_calls_issue1277) {
+    const char *contracts = "class Contract:\n"
+                            "    def process_batch(self) -> None:\n"
+                            "        ...\n";
+    const char *trainer = "from contracts import Contract\n\n"
+                          "def make():\n"
+                          "    return None\n\n"
+                          "class Trainer:\n"
+                          "    engine: Contract\n\n"
+                          "    def __init__(self, strategies: Contract) -> None:\n"
+                          "        self.strategies = strategies\n"
+                          "        self.typed: Contract = strategies\n"
+                          "        self.plain = make()\n";
+    const char *loop = "from trainer import Trainer\n\n"
+                       "def run(trainer: Trainer) -> None:\n"
+                       "    strategies = trainer.strategies\n"
+                       "    strategies.process_batch()\n\n"
+                       "def run_typed(trainer: Trainer) -> None:\n"
+                       "    trainer.typed.process_batch()\n\n"
+                       "def run_classlevel(trainer: Trainer) -> None:\n"
+                       "    trainer.engine.process_batch()\n\n"
+                       "def run_untyped(trainer: Trainer) -> None:\n"
+                       "    trainer.plain.process_batch()\n";
+    if (setup_usages_repo("contracts.py", contracts, "trainer.py", trainer) != 0) {
+        FAIL("failed to create temp dir");
+    }
+    char path[512];
+    snprintf(path, sizeof(path), "%s/loop.py", g_usages_tmpdir);
+    FILE *f = fopen(path, "w");
+    ASSERT_NOT_NULL(f);
+    fputs(loop, f);
+    fclose(f);
+
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/test_1277.db", g_usages_tmpdir);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_usages_tmpdir, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    cbm_store_t *s = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(s);
+    const char *project = cbm_pipeline_project_name(p);
+
+    int via_alias = count_lsp_calls(s, project, "loop.run", "contracts.Contract.process_batch");
+    int via_typed =
+        count_lsp_calls(s, project, "loop.run_typed", "contracts.Contract.process_batch");
+    int via_class =
+        count_lsp_calls(s, project, "loop.run_classlevel", "contracts.Contract.process_batch");
+    int via_untyped = count_lsp_calls(s, project, "loop.run_untyped", "process_batch");
+
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    teardown_usages_repo();
+
+    ASSERT_EQ(via_alias, 1);   /* self.x = <annotated __init__ parameter> */
+    ASSERT_EQ(via_typed, 1);   /* self.x: T = ... */
+    ASSERT_EQ(via_class, 1);   /* class-level x: T */
+    ASSERT_EQ(via_untyped, 0); /* control: no annotation, no guess */
+    PASS();
+}
+
 TEST(usages_creates_edges) {
     /* Port of TestPassUsagesCreatesEdges.
      * Go source with callback reference → USAGE edge. */
@@ -16378,6 +16470,7 @@ SUITE(pipeline) {
     RUN_TEST(implements_creates_override);
     RUN_TEST(implements_no_match);
     /* Usages pass (full pipeline integration) */
+    RUN_TEST(python_crossfile_typed_field_calls_issue1277);
     RUN_TEST(usages_creates_edges);
     RUN_TEST(usages_no_duplicate_calls);
     RUN_TEST(calls_edge_carries_call_site_line);
