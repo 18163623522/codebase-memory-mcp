@@ -4041,6 +4041,15 @@ static void c_emit_field_reference(CLSPContext *ctx, TSNode node) {
         return;
 
     const CBMRegisteredType *owner = c_lookup_field_owner(ctx, type_qn, field_name, 0);
+    if (!owner && ctx->cpp_mode) {
+        /* C++: an object of a KNOWN type that declares no such field
+         * (`text.size()` on a std::string) is evidence that no project Field
+         * is meant. Publish the type anyway: the row names no node, so the
+         * resolvers bind nothing instead of falling back to the member name.
+         * C keeps the fallback, since a C aggregate's nested anonymous members
+         * are not all registered on it. */
+        owner = c_resolve_field_owner_type(ctx, type_qn);
+    }
     if (!owner || !owner->qualified_name)
         return;
 

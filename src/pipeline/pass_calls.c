@@ -880,16 +880,25 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call, const CBM
                                        target_node->file_path)) {
     case CBM_FIELD_CALL_DROP:
         return 0;
-    case CBM_FIELD_CALL_BY_OWNER:
+    case CBM_FIELD_CALL_BY_OWNER: {
+        bool typed = false;
         target_node =
             cbm_pipeline_c_member_call_field(lsp_calls, NULL, ctx->gbuf, ctx->project_name,
-                                             call->enclosing_func_qn, call->callee_name);
+                                             call->enclosing_func_qn, call->callee_name, &typed);
+        if (!target_node && !typed) {
+            /* Untyped object: only a member name the project holds exactly
+             * once may still bind. */
+            const char *only = cbm_registry_unique_field_qn(
+                ctx->registry, cbm_lsp_bare_segment(call->callee_name));
+            target_node = only ? cbm_gbuf_find_by_qn(ctx->gbuf, only) : NULL;
+        }
         if (!target_node || source_node->id == target_node->id) {
             return 0;
         }
         res.qualified_name = target_node->qualified_name;
-        res.strategy = "lsp_field_access";
+        res.strategy = typed ? "lsp_field_access" : "unique_name";
         break;
+    }
     case CBM_FIELD_CALL_KEEP:
         break;
     }

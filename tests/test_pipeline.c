@@ -6824,7 +6824,9 @@ static int field_inbound_edge_count(cbm_store_t *s, const char *project, const c
  * `count`, and each function touches exactly one of them. A bare-name lookup
  * of `count` can only pick one Field for both functions; only the type of the
  * object expression says which struct is meant. `use_opaque` reaches `count`
- * through a type the project never defines, so no Field may be bound at all.
+ * through a type the project never defines, so no Field may be bound at all;
+ * `beta_only` through that same untyped object is the one Field of that name
+ * in the project, so nothing has to be picked and it binds.
  *
  * Calls follow the same rule. The structs carry a function-pointer member
  * `notify` (declared through a typedef: a member spelled `void (*notify)(int)`
@@ -6890,7 +6892,7 @@ static void write_c_member_field_fixture(const char *tmp, int pad_files) {
                     "struct Opaque;\n"
                     "\n"
                     "int use_opaque(struct Opaque *o) {\n"
-                    "    return o->count;\n"
+                    "    return o->count + o->beta_only;\n"
                     "}\n");
     for (int i = 0; i < pad_files; i++) {
         char name[64];
@@ -6919,9 +6921,12 @@ static int assert_c_member_fields_bind_by_type(cbm_store_t *s, const char *proje
     /* A field whose name is unique keeps its edge. */
     ASSERT_TRUE(field_edge_exists(s, project, "use_alpha", "Alpha", "alpha_only", "USAGE"));
     ASSERT_TRUE(field_edge_exists(s, project, "use_beta", "Beta", "beta_only", "USAGE"));
-    /* An object whose type the project never defines binds no Field. */
+    /* An object whose type the project never defines binds no Field by a
+     * name several structs share... */
     ASSERT_FALSE(field_edge_exists(s, project, "use_opaque", "Alpha", "count", "USAGE"));
     ASSERT_FALSE(field_edge_exists(s, project, "use_opaque", "Beta", "count", "USAGE"));
+    /* ...and still binds a member name the project holds exactly once. */
+    ASSERT_TRUE(field_edge_exists(s, project, "use_opaque", "Beta", "beta_only", "USAGE"));
     /* A call through a function-pointer member lands on the member of its
      * object's type, not on the same-named member its own file declares. */
     ASSERT_GTE(fixture_node_count(s, project, "mix.c", "notify", "Field"), 1);

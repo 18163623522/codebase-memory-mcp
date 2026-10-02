@@ -1070,6 +1070,39 @@ TEST(call_onto_field_follows_language_and_shape) {
     PASS();
 }
 
+TEST(unique_field_qn_needs_exactly_one_field_of_that_name) {
+    /* What an untyped C member access may still bind: a name exactly one
+     * Field carries. Two Fields would be a choice; a function or variable of
+     * the same name is not a candidate for a member at all. */
+    cbm_registry_t *r = cbm_registry_new();
+    ASSERT_NOT_NULL(r);
+    cbm_registry_add(r, "only_here", "proj.a.Alpha.only_here", "Field");
+    cbm_registry_add(r, "count", "proj.a.Alpha.count", "Field");
+    cbm_registry_add(r, "count", "proj.b.Beta.count", "Field");
+    cbm_registry_add(r, "close", "proj.cb.Callbacks.close", "Field");
+    cbm_registry_add(r, "close", "proj.io.close", "Function");
+    cbm_registry_add(r, "lonely_fn", "proj.io.lonely_fn", "Function");
+
+    const char *only = cbm_registry_unique_field_qn(r, "only_here");
+    ASSERT_NOT_NULL(only);
+    ASSERT_STR_EQ(only, "proj.a.Alpha.only_here");
+    /* Two fields share the name: no pick. */
+    ASSERT_NULL(cbm_registry_unique_field_qn(r, "count"));
+    /* One field and one function share the name: the function is not a
+     * candidate for a member, so the field is still the only one. */
+    const char *member = cbm_registry_unique_field_qn(r, "close");
+    ASSERT_NOT_NULL(member);
+    ASSERT_STR_EQ(member, "proj.cb.Callbacks.close");
+    /* Unique, but not a field. */
+    ASSERT_NULL(cbm_registry_unique_field_qn(r, "lonely_fn"));
+    /* Unknown name and degenerate input. */
+    ASSERT_NULL(cbm_registry_unique_field_qn(r, "absent"));
+    ASSERT_NULL(cbm_registry_unique_field_qn(r, NULL));
+    ASSERT_NULL(cbm_registry_unique_field_qn(NULL, "count"));
+    cbm_registry_free(r);
+    PASS();
+}
+
 TEST(c_member_access_binds_by_owner_only) {
     /* The member half of a C `a.b` / `a->b` means nothing without the type of
      * `a`: it binds through the C LSP's field-owner rows and never through a
@@ -1344,6 +1377,7 @@ SUITE(registry) {
     RUN_TEST(cross_language_ref_drops_go_vs_c);
     RUN_TEST(go_bare_ref_never_binds_field);
     RUN_TEST(call_onto_field_follows_language_and_shape);
+    RUN_TEST(unique_field_qn_needs_exactly_one_field_of_that_name);
     RUN_TEST(c_member_access_binds_by_owner_only);
     RUN_TEST(dynamic_suppress_drops_weak_method_matches);
     RUN_TEST(dynamic_suppress_keeps_high_confidence_and_non_methods);

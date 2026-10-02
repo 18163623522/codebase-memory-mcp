@@ -172,19 +172,32 @@ static int resolve_usage_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *res
             cbm_pipeline_lsp_field_cursor_t owners = cbm_pipeline_lsp_field_cursor(
                 &result->resolved_calls, field_index_ready ? &field_index : NULL,
                 usage->enclosing_func_qn, usage->ref_name);
+            char member_esc[CBM_SZ_256];
+            cbm_json_escape(member_esc, sizeof(member_esc), usage->ref_name);
+            char member_props[CBM_SZ_512];
+            snprintf(member_props, sizeof(member_props), "{\"callee\":\"%s\"}", member_esc);
             const CBMResolvedCall *owner;
+            bool typed = false;
             while ((owner = cbm_pipeline_lsp_field_next(&owners)) != NULL) {
+                typed = true;
                 const cbm_gbuf_node_t *field =
                     cbm_pipeline_lsp_field_node(ctx->gbuf, ctx->project_name, owner);
                 if (!field || field->id == src->id) {
                     continue;
                 }
-                char member_esc[CBM_SZ_256];
-                cbm_json_escape(member_esc, sizeof(member_esc), usage->ref_name);
-                char member_props[CBM_SZ_512];
-                snprintf(member_props, sizeof(member_props), "{\"callee\":\"%s\"}", member_esc);
                 cbm_gbuf_insert_edge(ctx->gbuf, src->id, field->id, "USAGE", member_props);
                 resolved++;
+            }
+            if (!typed) {
+                /* The LSP could not type the object: only a member name the
+                 * project holds exactly once may still bind. */
+                const char *only = cbm_registry_unique_field_qn(ctx->registry, usage->ref_name);
+                const cbm_gbuf_node_t *field = only ? cbm_gbuf_find_by_qn(ctx->gbuf, only) : NULL;
+                if (field && field->id != src->id &&
+                    !cbm_suppress_cross_language_ref(lang, field->file_path)) {
+                    cbm_gbuf_insert_edge(ctx->gbuf, src->id, field->id, "USAGE", member_props);
+                    resolved++;
+                }
             }
             continue;
         }
@@ -332,16 +345,27 @@ static int resolve_rw_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *result
             cbm_pipeline_lsp_field_cursor_t owners = cbm_pipeline_lsp_field_cursor(
                 &result->resolved_calls, field_index_ready ? &field_index : NULL,
                 rw->enclosing_func_qn, rw->var_name);
+            const char *member_edge = rw->is_write ? "WRITES" : "READS";
             const CBMResolvedCall *owner;
+            bool typed = false;
             while ((owner = cbm_pipeline_lsp_field_next(&owners)) != NULL) {
+                typed = true;
                 const cbm_gbuf_node_t *field =
                     cbm_pipeline_lsp_field_node(ctx->gbuf, ctx->project_name, owner);
                 if (!field || field->id == src->id) {
                     continue;
                 }
-                cbm_gbuf_insert_edge(ctx->gbuf, src->id, field->id,
-                                     rw->is_write ? "WRITES" : "READS", "{}");
+                cbm_gbuf_insert_edge(ctx->gbuf, src->id, field->id, member_edge, "{}");
                 resolved++;
+            }
+            if (!typed) {
+                const char *only = cbm_registry_unique_field_qn(ctx->registry, rw->var_name);
+                const cbm_gbuf_node_t *field = only ? cbm_gbuf_find_by_qn(ctx->gbuf, only) : NULL;
+                if (field && field->id != src->id &&
+                    !cbm_suppress_cross_language_ref(lang, field->file_path)) {
+                    cbm_gbuf_insert_edge(ctx->gbuf, src->id, field->id, member_edge, "{}");
+                    resolved++;
+                }
             }
             continue;
         }

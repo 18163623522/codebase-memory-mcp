@@ -1022,19 +1022,23 @@ static inline const cbm_gbuf_node_t *cbm_pipeline_lsp_field_node(const cbm_gbuf_
     return node && node->label && strcmp(node->label, "Field") == 0 ? node : NULL;
 }
 
-/* The Field a C member call (`cb.close(ctx)`) lands on, decided by the type of
- * its object: among the owner rows of (enclosing function, member name) that
- * name a project Field, the one with the smallest QN, so the sequential scan
- * and the sorted index agree. NULL when no owner is known. */
+/* The Field a C/C++ member call (`cb.close(ctx)`) lands on, decided by the
+ * type of its object: among the owner rows of (enclosing function, member
+ * name) that name a project Field, the one with the smallest QN, so the
+ * sequential scan and the sorted index agree. *typed says whether the LSP
+ * typed the object at all; NULL with *typed set means "typed, and no project
+ * Field is meant", NULL without it means the caller may try the member name. */
 static inline const cbm_gbuf_node_t *cbm_pipeline_c_member_call_field(
     const CBMResolvedCallArray *arr, const cbm_pipeline_lsp_field_index_t *index,
     const cbm_gbuf_t *gbuf, const char *project_name, const char *enclosing_func_qn,
-    const char *callee_text) {
+    const char *callee_text, bool *typed) {
     cbm_pipeline_lsp_field_cursor_t owners = cbm_pipeline_lsp_field_cursor(
         arr, index, enclosing_func_qn, cbm_lsp_bare_segment(callee_text));
     const cbm_gbuf_node_t *best = NULL;
     const CBMResolvedCall *owner;
+    *typed = false;
     while ((owner = cbm_pipeline_lsp_field_next(&owners)) != NULL) {
+        *typed = true;
         const cbm_gbuf_node_t *field = cbm_pipeline_lsp_field_node(gbuf, project_name, owner);
         if (field && (!best || strcmp(field->qualified_name, best->qualified_name) < 0)) {
             best = field;

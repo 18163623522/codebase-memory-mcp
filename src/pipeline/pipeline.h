@@ -370,10 +370,15 @@ cbm_field_call_policy_t cbm_call_onto_field_policy(CBMLanguage caller_lang, cons
                                                    const char *target_file_path);
 
 /* True when a reference is the member half of a C `a.b` / `a->b`. Such a
- * reference binds only through the C LSP's field-owner rows (the type of `a`),
- * never through a bare-name lookup of `b`. C only. Pure; unit-tested in
- * test_registry.c. */
+ * reference binds through the C LSP's field-owner rows (the type of `a`); with
+ * no typed owner it binds only cbm_registry_unique_field_qn(). C only. Pure;
+ * unit-tested in test_registry.c. */
 bool cbm_c_member_binds_by_owner(bool is_c, bool is_member_access);
+
+/* The QN of the Field `member_name` names when exactly one Field in the
+ * registry carries that name (symbols of other labels are not candidates for
+ * a member); NULL when none or several do. */
+const char *cbm_registry_unique_field_qn(const cbm_registry_t *r, const char *member_name);
 
 /* Get the label of a qualified name, or NULL if not found. */
 const char *cbm_registry_label_of(const cbm_registry_t *r, const char *qn);

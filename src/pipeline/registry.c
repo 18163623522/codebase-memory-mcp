@@ -849,7 +849,9 @@ bool cbm_c_member_binds_by_owner(bool is_c, bool is_member_access) {
      * registry bound whichever Field (or function, or variable) was called
      * `b` -- on this repository 9,150 USAGE and 2,810 WRITES edges onto
      * Fields, 3,976 of the USAGE edges on a name several structs share. Such a
-     * reference binds only through the C LSP's field-owner rows.
+     * reference binds through the C LSP's field-owner rows; an object the LSP
+     * could not type binds only a member name that is unique in the project
+     * (cbm_registry_unique_field_qn), never one of several.
      *
      * C-gated like the Go rule above: a C++ or Objective-C method body
      * reaches its own members without a selector, and their member accesses
@@ -1032,6 +1034,33 @@ int cbm_registry_find_by_name(const cbm_registry_t *r, const char *name, const c
         *count = 0;
     }
     return 0;
+}
+
+const char *cbm_registry_unique_field_qn(const cbm_registry_t *r, const char *member_name) {
+    /* A member name that exactly one Field in the whole project carries names
+     * that Field without any choice being made. This is what an untyped C
+     * member access may still bind: the defect in bare-name member resolution
+     * was the arbitrary pick among SEVERAL same-named members (kernel: 359,236
+     * of the edges a typed-only rule dropped were onto such a unique name).
+     * Only Fields are candidates -- a function or variable of the same name
+     * can never be what `a.b` means -- and two of them bind nothing. */
+    const char **qns = NULL;
+    int count = 0;
+    if (!member_name || cbm_registry_find_by_name(r, member_name, &qns, &count) != 0 || !qns) {
+        return NULL;
+    }
+    const char *only = NULL;
+    for (int i = 0; i < count; i++) {
+        const char *label = qns[i] ? cbm_registry_label_of(r, qns[i]) : NULL;
+        if (!label || strcmp(label, "Field") != 0) {
+            continue;
+        }
+        if (only) {
+            return NULL;
+        }
+        only = qns[i];
+    }
+    return only;
 }
 
 int cbm_registry_size(const cbm_registry_t *r) {
