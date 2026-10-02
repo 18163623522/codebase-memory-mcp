@@ -298,7 +298,9 @@ TEST(index_long_log_override_writes_no_cut_path) {
      * root has its links resolved: the kernel bounds the EXPANDED path, and
      * under macOS's /tmp -> /private/tmp link a near-1 KiB path can be neither
      * created nor probed, which would hide the cut-off file. */
-    char tmpl[64];
+    /* cbm_mkdtemp writes the %TEMP%-expanded path back on Windows, so the
+     * template buffer needs the 256 bytes that compat.h asks for. */
+    char tmpl[256];
     char logroot[4096];
     snprintf(tmpl, sizeof(tmpl), "/tmp/cbm_resil_log_XXXXXX");
     if (!cbm_mkdtemp(tmpl)) {

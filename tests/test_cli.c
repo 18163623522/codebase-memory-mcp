@@ -14660,7 +14660,7 @@ static int hl_run_hook(const char *home, const char *cache_dir) {
  * near-1 KiB path can be neither created nor probed, which hides the very
  * cut-off file these tests look for. */
 static bool hl_make_root(char *root, size_t root_sz) {
-    char tmpl[64];
+    char tmpl[256];
     char real[4096];
     snprintf(tmpl, sizeof(tmpl), "/tmp/cbm-hooklog-XXXXXX");
     if (!cbm_mkdtemp(tmpl)) {
