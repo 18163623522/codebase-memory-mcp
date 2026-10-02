@@ -9608,6 +9608,7 @@ TEST(cli_claude_user_scope_avoids_nested_mcp_json) {
     char dir[512];
     snprintf(dir, sizeof(dir), "%s/.claude", tmpdir);
     test_mkdirp(dir);
+    test_mark_claude_code_installed(tmpdir);
 
     char *json = cbm_build_install_plan_json(tmpdir, "/usr/local/bin/codebase-memory-mcp");
     bool has_user_config = json && strstr(json, "/.claude.json") != NULL;
@@ -13171,6 +13172,7 @@ TEST(cli_upgrade_preserves_near_legacy_claude_hook_script) {
     snprintf(gate_path, sizeof(gate_path), "%s/cbm-code-discovery-gate", hooks_dir);
     snprintf(settings_path, sizeof(settings_path), "%s/.claude/settings.json", tmpdir);
     test_mkdirp(hooks_dir);
+    test_mark_claude_code_installed(tmpdir);
     const char *modified_legacy =
         "#!/usr/bin/env bash\n"
         "# codebase-memory-mcp search augmenter (Claude Code PreToolUse).\n"
@@ -13262,6 +13264,7 @@ TEST(cli_claude_hook_script_collisions_are_not_registered) {
     snprintf(session, sizeof(session), "%s/cbm-session-reminder", hooks_dir);
     snprintf(settings, sizeof(settings), "%s/.claude/settings.json", tmpdir);
     test_mkdirp(hooks_dir);
+    test_mark_claude_code_installed(tmpdir);
     write_test_file(victim, "victim-owned\n");
     ASSERT_EQ(symlink(victim, gate), 0);
     write_test_file(session, "#!/bin/sh\necho user-owned\n");
@@ -13328,6 +13331,7 @@ TEST(cli_uninstall_removes_claude_hook_scripts) {
     char config_dir[512];
     snprintf(config_dir, sizeof(config_dir), "%s/.claude", tmpdir);
     test_mkdirp(config_dir);
+    test_mark_claude_code_installed(tmpdir);
 
     char *saved_home = save_test_env("HOME");
     char *saved_path = save_test_env("PATH");
@@ -14504,6 +14508,7 @@ TEST(cli_windows_claude_hook_scripts_migrate_and_uninstall_all_owned_shapes) {
     snprintf(appdata, sizeof(appdata), "%s/AppData/Roaming", tmpdir);
     snprintf(binary_path, sizeof(binary_path), "%s/.local/bin/codebase-memory-mcp.exe", tmpdir);
     test_mkdirp(hooks_dir);
+    test_mark_claude_code_installed(config_dir);
 
     const char *const env_names[] = {"HOME",        "PATH",       "CLAUDE_CONFIG_DIR",
                                      "APPDATA",     "CODEX_HOME", "OPENCODE_CONFIG",
