@@ -174,7 +174,13 @@ typedef struct {
     bool output_filled;
     int calls;
     char command[CBM_SZ_4K];
+    /* When set, the hook counts cbm-search-* entries here at spawn time, which
+     * proves the scan's scratch really lives in this private directory. */
+    const char *scratch_directory;
+    int scratch_seen;
 } mcp_search_command_probe_t;
+
+static int mcp_count_directory_entries_with_prefix(const char *directory, const char *prefix);
 
 typedef struct {
     char path[512];
@@ -213,6 +219,10 @@ static bool mcp_search_command_hook_probe(void *context, const char *command) {
     }
     probe->calls++;
     snprintf(probe->command, sizeof(probe->command), "%s", command);
+    if (probe->scratch_directory) {
+        probe->scratch_seen =
+            mcp_count_directory_entries_with_prefix(probe->scratch_directory, "cbm-search-");
+    }
     if (probe->delay_ms > 0) {
         cbm_usleep(probe->delay_ms * 1000U);
     }
@@ -11145,13 +11155,14 @@ TEST(search_code_output_limit_fails_closed_and_cleans_scan) {
 TEST(search_code_scan_deadline_fails_closed_and_resets) {
     mcp_search_cache_t cache;
     ASSERT_TRUE(mcp_search_cache_open(&cache, "cbm-search-deadline"));
-    int scratch_before = mcp_count_directory_entries_with_prefix(cbm_tmpdir(), "cbm-search-");
-    ASSERT_TRUE(scratch_before >= 0);
 
     char tmp[512], src_path[768], vendor_path[768];
     cbm_mcp_server_t *srv = setup_prefilter_server(tmp, sizeof(tmp), src_path, sizeof(src_path),
                                                    vendor_path, sizeof(vendor_path));
     ASSERT_NOT_NULL(srv);
+    /* Scratch goes to the private cache dir: the shared temp dir is visible to
+     * every other process on the machine, so a count there is not exact. */
+    cbm_mcp_server_set_search_scratch_dir_for_test(srv, cache.path);
     cbm_mcp_server_set_search_scan_timeout_for_test(srv, 0, true);
 
     char *response =
@@ -11175,7 +11186,7 @@ TEST(search_code_scan_deadline_fails_closed_and_resets) {
     /* An immediate deadline can return before the log directory is created;
      * both a missing directory (-1) and an empty one (0) prove no artifact. */
     ASSERT_TRUE(mcp_count_directory_entries_with_prefix(logs, ".mcp-command-") <= 0);
-    ASSERT_EQ(mcp_count_directory_entries_with_prefix(cbm_tmpdir(), "cbm-search-"), scratch_before);
+    ASSERT_EQ(mcp_count_directory_entries_with_prefix(cache.path, "cbm-search-"), 0);
     free(response);
 
     cbm_mcp_server_set_search_scan_timeout_for_test(srv, 0, false);
@@ -11276,13 +11287,14 @@ TEST(search_code_scan_setup_failures_respect_cause_precedence) {
 TEST(search_code_scan_live_child_deadline_is_bounded_and_fails_closed) {
     mcp_search_cache_t cache;
     ASSERT_TRUE(mcp_search_cache_open(&cache, "cbm-search-live-deadline"));
-    int scratch_before = mcp_count_directory_entries_with_prefix(cbm_tmpdir(), "cbm-search-");
-    ASSERT_TRUE(scratch_before >= 0);
 
     char tmp[512], src_path[768], vendor_path[768];
     cbm_mcp_server_t *srv = setup_prefilter_server(tmp, sizeof(tmp), src_path, sizeof(src_path),
                                                    vendor_path, sizeof(vendor_path));
     ASSERT_NOT_NULL(srv);
+    /* Count only this server's scratch. The hook-rejection test below observes
+     * creation directly, without requiring this short deadline to reach spawn. */
+    cbm_mcp_server_set_search_scratch_dir_for_test(srv, cache.path);
 #ifdef _WIN32
     const char *slow_command =
         "echo deadline-partial-output & powershell.exe -NoProfile -Command \"Start-Sleep -Seconds "
@@ -11305,7 +11317,7 @@ TEST(search_code_scan_live_child_deadline_is_bounded_and_fails_closed) {
     char logs[640];
     snprintf(logs, sizeof(logs), "%s/logs", cache.path);
     int command_artifacts = mcp_count_directory_entries_with_prefix(logs, ".mcp-command-");
-    int scratch_after = mcp_count_directory_entries_with_prefix(cbm_tmpdir(), "cbm-search-");
+    int scratch_after = mcp_count_directory_entries_with_prefix(cache.path, "cbm-search-");
 
     free(response);
     cbm_mcp_server_set_search_scan_command_for_test(srv, NULL);
@@ -11317,7 +11329,7 @@ TEST(search_code_scan_live_child_deadline_is_bounded_and_fails_closed) {
     ASSERT_TRUE(timed_out);
     ASSERT_TRUE(partial_hidden);
     ASSERT_EQ(command_artifacts, 0);
-    ASSERT_EQ(scratch_after, scratch_before);
+    ASSERT_EQ(scratch_after, 0);
     PASS();
 }
 
@@ -11380,14 +11392,13 @@ TEST(search_code_scan_deadline_precedes_output_limit) {
 TEST(search_code_scan_hook_rejection_is_contained_and_cleans_up) {
     mcp_search_cache_t cache;
     ASSERT_TRUE(mcp_search_cache_open(&cache, "cbm-search-reject"));
-    int scratch_before = mcp_count_directory_entries_with_prefix(cbm_tmpdir(), "cbm-search-");
-    ASSERT_TRUE(scratch_before >= 0);
 
     char tmp[512], src_path[768], vendor_path[768];
     cbm_mcp_server_t *srv = setup_prefilter_server(tmp, sizeof(tmp), src_path, sizeof(src_path),
                                                    vendor_path, sizeof(vendor_path));
     ASSERT_NOT_NULL(srv);
-    mcp_search_command_probe_t probe = {.reject = true};
+    cbm_mcp_server_set_search_scratch_dir_for_test(srv, cache.path);
+    mcp_search_command_probe_t probe = {.reject = true, .scratch_directory = cache.path};
     cbm_mcp_server_set_command_test_hook(srv, mcp_search_command_hook_probe, &probe);
 
     char *response = cbm_mcp_handle_tool(srv, "search_code",
@@ -11402,11 +11413,52 @@ TEST(search_code_scan_hook_rejection_is_contained_and_cleans_up) {
     char logs[640];
     snprintf(logs, sizeof(logs), "%s/logs", cache.path);
     ASSERT_EQ(mcp_count_directory_entries_with_prefix(logs, ".mcp-command-"), 0);
-    ASSERT_EQ(mcp_count_directory_entries_with_prefix(cbm_tmpdir(), "cbm-search-"), scratch_before);
+    ASSERT_EQ(probe.scratch_seen, 1);
+    ASSERT_EQ(mcp_count_directory_entries_with_prefix(cache.path, "cbm-search-"), 0);
     free(response);
     cbm_mcp_server_free(srv);
     cleanup_prefilter_dir(tmp, src_path, vendor_path);
     ASSERT_TRUE(mcp_search_cache_close(&cache));
+    PASS();
+}
+
+/* The private parent seam also pins scratch creation failure without changing
+ * process-wide temp settings. A valid path filter exercises its early cleanup
+ * under leak sanitizers; no command should be launched. */
+TEST(search_code_scratch_creation_error_releases_path_filter) {
+    mcp_search_cache_t cache;
+    ASSERT_TRUE(mcp_search_cache_open(&cache, "cbm-search-scratch-error"));
+    char blocker_path[640];
+    snprintf(blocker_path, sizeof(blocker_path), "%s/not-a-directory", cache.path);
+    FILE *blocker = cbm_fopen(blocker_path, "wb");
+    ASSERT_NOT_NULL(blocker);
+    ASSERT_EQ(fclose(blocker), 0);
+
+    char tmp[512], src_path[768], vendor_path[768];
+    cbm_mcp_server_t *srv = setup_prefilter_server(tmp, sizeof(tmp), src_path, sizeof(src_path),
+                                                   vendor_path, sizeof(vendor_path));
+    ASSERT_NOT_NULL(srv);
+    cbm_mcp_server_set_search_scratch_dir_for_test(srv, blocker_path);
+    mcp_search_command_probe_t probe = {0};
+    cbm_mcp_server_set_command_test_hook(srv, mcp_search_command_hook_probe, &probe);
+    char *response =
+        cbm_mcp_handle_tool(srv, "search_code",
+                            "{\"pattern\":\"HandleRequest\",\"project\":\"prefilter-search\","
+                            "\"path_filter\":\"^cbm_leak_probe/\"}");
+    bool setup_error = response && strstr(response, "\"isError\":true") != NULL &&
+                       strstr(response, "cannot create temp file") != NULL;
+    int scratch_after = mcp_count_directory_entries_with_prefix(cache.path, "cbm-search-");
+    free(response);
+    cbm_mcp_server_set_search_scratch_dir_for_test(srv, NULL);
+    cbm_mcp_server_free(srv);
+    cleanup_prefilter_dir(tmp, src_path, vendor_path);
+    int removed = cbm_unlink(blocker_path);
+    bool cache_closed = mcp_search_cache_close(&cache);
+    ASSERT_TRUE(setup_error);
+    ASSERT_EQ(probe.calls, 0);
+    ASSERT_EQ(scratch_after, 0);
+    ASSERT_EQ(removed, 0);
+    ASSERT_TRUE(cache_closed);
     PASS();
 }
 
@@ -21277,6 +21329,7 @@ SUITE(mcp) {
     RUN_TEST(search_code_scan_cancellation_precedes_zero_deadline);
     RUN_TEST(search_code_scan_deadline_precedes_output_limit);
     RUN_TEST(search_code_scan_hook_rejection_is_contained_and_cleans_up);
+    RUN_TEST(search_code_scratch_creation_error_releases_path_filter);
     RUN_TEST(search_code_scoped_exit_one_is_not_no_match);
     RUN_TEST(search_code_no_match_is_empty_for_direct_and_scoped_routes);
     RUN_TEST(search_code_scoped_scan_skips_non_regular_indexed_paths);
