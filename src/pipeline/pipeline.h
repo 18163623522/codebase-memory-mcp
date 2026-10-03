@@ -369,11 +369,25 @@ cbm_field_call_policy_t cbm_call_onto_field_policy(CBMLanguage caller_lang, cons
                                                    const char *target_label,
                                                    const char *target_file_path);
 
+/* True for a C/C++ call spelled through an arrow (`p->open(fd)`). The
+ * short-name registry splits a callee on `.` and `::` only, so such a call
+ * comes back from it unresolved; the caller then asks the object's type for
+ * the member, as for a dot call. Pure; unit-tested in test_registry.c. */
+bool cbm_c_arrow_member_call(CBMLanguage caller_lang, const char *callee_text);
+
 /* True when a reference is the member half of a C `a.b` / `a->b`. Such a
  * reference binds through the C LSP's field-owner rows (the type of `a`); with
  * no typed owner it binds only cbm_registry_unique_field_qn(). C only. Pure;
  * unit-tested in test_registry.c. */
 bool cbm_c_member_binds_by_owner(bool is_c, bool is_member_access);
+
+/* True when a file's member accesses follow the C member rule above: every C
+ * file, and every `.h`. A `.h` is parsed as C++ because it may be either, and
+ * `a.b` / `a->b` means the same in both: the type of `a` names `b`. Without it
+ * the inline functions of a C header kept binding members by bare name. Other
+ * C++ files are left to their own resolution. Pure; unit-tested in
+ * test_registry.c. */
+bool cbm_c_member_rule_file(CBMLanguage lang, const char *rel_path);
 
 /* The QN of the Field `member_name` names when exactly one Field in the
  * registry carries that name (symbols of other labels are not candidates for

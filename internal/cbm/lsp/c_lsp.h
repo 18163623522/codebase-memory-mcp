@@ -72,6 +72,13 @@ typedef struct {
     int field_ref_seen_cap;
     int field_ref_seen_count;
 
+    // The type an initializer_list is about to initialize, handed from the
+    // declarator / compound literal / enclosing list that knows it to the walk
+    // of that list. Bound to the list's node id: a hint nothing consumed must
+    // never type a later, unrelated list.
+    const CBMType *init_list_type;
+    const void *init_list_id;
+
     // Output
     CBMResolvedCallArray *resolved_calls;
     CBMSourceOrigin source_origin; // source buffer represented by emitted occurrence spans

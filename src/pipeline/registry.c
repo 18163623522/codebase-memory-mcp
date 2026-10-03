@@ -843,6 +843,24 @@ cbm_field_call_policy_t cbm_call_onto_field_policy(CBMLanguage caller_lang, cons
     return caller_lang == CBM_LANG_C ? CBM_FIELD_CALL_DROP : CBM_FIELD_CALL_KEEP;
 }
 
+bool cbm_c_arrow_member_call(CBMLanguage caller_lang, const char *callee_text) {
+    if (caller_lang != CBM_LANG_C && caller_lang != CBM_LANG_CPP) {
+        return false;
+    }
+    return callee_text != NULL && strstr(callee_text, "->") != NULL;
+}
+
+bool cbm_c_member_rule_file(CBMLanguage lang, const char *rel_path) {
+    if (lang == CBM_LANG_C) {
+        return true;
+    }
+    if (lang != CBM_LANG_CPP || !rel_path) {
+        return false;
+    }
+    size_t len = strlen(rel_path);
+    return len > PAIR_LEN && strcmp(rel_path + len - PAIR_LEN, ".h") == 0;
+}
+
 bool cbm_c_member_binds_by_owner(bool is_c, bool is_member_access) {
     /* The member half of `a.b` / `a->b` is not a name in any C scope: only the
      * type of `a` gives `b` a meaning. Handing the bare `b` to the short-name

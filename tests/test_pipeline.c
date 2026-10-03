@@ -6894,6 +6894,195 @@ static void write_c_member_field_fixture(const char *tmp, int pad_files) {
                     "int use_opaque(struct Opaque *o) {\n"
                     "    return o->count + o->beta_only;\n"
                     "}\n");
+    /* Inline functions in a header. A `.h` is parsed as C++, and its member
+     * accesses mean what they mean in the .c files that include it. */
+    write_temp_file(tmp, "inline.h",
+                    "#ifndef INLINE_H\n"
+                    "#define INLINE_H\n"
+                    "#include \"alpha.h\"\n"
+                    "#include \"beta.h\"\n"
+                    "static inline int hdr_alpha(struct Alpha *a) {\n"
+                    "    return a->count;\n"
+                    "}\n"
+                    "static inline int hdr_beta(Beta *b) {\n"
+                    "    b->count = 1;\n"
+                    "    return b->count;\n"
+                    "}\n"
+                    "/* A struct the header itself declares, through a typedef. */\n"
+                    "typedef struct {\n"
+                    "    int count;\n"
+                    "    char *buf;\n"
+                    "} HdrBuf;\n"
+                    "struct HdrNode {\n"
+                    "    int count;\n"
+                    "};\n"
+                    "static inline int hdr_own_typedef(HdrBuf *s) {\n"
+                    "    return s->count;\n"
+                    "}\n"
+                    "static inline int hdr_own_struct(struct HdrNode *n) {\n"
+                    "    return n->count;\n"
+                    "}\n"
+                    "#endif\n");
+    /* Functions inside preprocessor branches of a .c file are functions like
+     * any other. */
+    write_temp_file(tmp, "guarded.c",
+                    "#include \"alpha.h\"\n"
+                    "#include \"beta.h\"\n"
+                    "\n"
+                    "#ifdef SOME_CONFIG\n"
+                    "int guarded_alpha(struct Alpha *a) {\n"
+                    "    return a->count;\n"
+                    "}\n"
+                    "#else\n"
+                    "int guarded_beta(Beta *b) {\n"
+                    "    return b->count;\n"
+                    "}\n"
+                    "#endif\n");
+    /* A member call on an object nothing types. In C the one member of that
+     * name in the project may still bind; in a C++ source such a call is a
+     * method of some type the project does not hold, and binds nothing. */
+    write_temp_file(tmp, "cb.h",
+                    "#ifndef CB_H\n"
+                    "#define CB_H\n"
+                    "struct CbTable {\n"
+                    "    int (*only_cb)(int);\n"
+                    "};\n"
+                    "#endif\n");
+    write_temp_file(tmp, "untyped_c.c",
+                    "struct Hidden;\n"
+                    "\n"
+                    "int c_untyped_call(struct Hidden *h) {\n"
+                    "    return h->only_cb(1);\n"
+                    "}\n");
+    write_temp_file(tmp, "untyped_cpp.cpp",
+                    "template <class T> int cpp_untyped_call(T *h) {\n"
+                    "    return h->only_cb(1);\n"
+                    "}\n");
+    /* A global variable declared behind an `#ifndef` types the accesses made
+     * through it, whether its type is spelled with `struct` or a typedef. */
+    write_temp_file(tmp, "globals.c",
+                    "#include \"alpha.h\"\n"
+                    "#include \"beta.h\"\n"
+                    "\n"
+                    "#ifndef NO_GLOBALS\n"
+                    "static struct Alpha g_alpha;\n"
+                    "static Beta g_beta;\n"
+                    "#endif\n"
+                    "\n"
+                    "int read_alpha_global(void) {\n"
+                    "    return g_alpha.count;\n"
+                    "}\n"
+                    "\n"
+                    "int read_beta_global(void) {\n"
+                    "    return g_beta.count;\n"
+                    "}\n");
+    /* Ops tables: pointer-to-function members written inline, called through
+     * `->`. Two tables share both member names, so only the object's type
+     * says which is called; `arrow_chain` reaches its table through a member
+     * whose type is spelled `struct Ops *`. */
+    write_temp_file(tmp, "ops.h",
+                    "#ifndef OPS_H\n"
+                    "#define OPS_H\n"
+                    "struct Dev;\n"
+                    "struct Ops {\n"
+                    "    void (*open)(int fd);\n"
+                    "    int (*shut)(int fd);\n"
+                    "    struct Dev *(*owner)(int fd);\n"
+                    "};\n"
+                    "struct Dev {\n"
+                    "    struct Ops *ops;\n"
+                    "    int id;\n"
+                    "};\n"
+                    "struct Bank {\n"
+                    "    struct Dev *devs, *spare;\n"
+                    "    struct Dev fixed[2];\n"
+                    "    int id;\n"
+                    "};\n"
+                    "#endif\n");
+    write_temp_file(tmp, "other_ops.h",
+                    "#ifndef OTHER_OPS_H\n"
+                    "#define OTHER_OPS_H\n"
+                    "struct OtherOps {\n"
+                    "    void (*open)(int fd);\n"
+                    "    int (*shut)(int fd);\n"
+                    "    int id;\n"
+                    "};\n"
+                    "#endif\n");
+    write_temp_file(tmp, "use_ops.c",
+                    "#include \"ops.h\"\n"
+                    "#include \"other_ops.h\"\n"
+                    "\n"
+                    "void arrow_ops(struct Ops *o) {\n"
+                    "    o->open(1);\n"
+                    "}\n"
+                    "\n"
+                    "void arrow_other(struct OtherOps *x) {\n"
+                    "    x->open(2);\n"
+                    "}\n"
+                    "\n"
+                    "int arrow_chain(struct Dev *d) {\n"
+                    "    return d->ops->shut(3);\n"
+                    "}\n"
+                    "\n"
+                    "int arrow_ret(struct Ops *o) {\n"
+                    "    return o->owner(4)->id;\n"
+                    "}\n"
+                    "\n"
+                    "int index_ptr(struct Bank *b) {\n"
+                    "    return b->devs[1].id;\n"
+                    "}\n"
+                    "\n"
+                    "int index_arr(struct Bank *b) {\n"
+                    "    return b->fixed[0].id;\n"
+                    "}\n"
+                    "\n"
+                    "int second_decl(struct Bank *b) {\n"
+                    "    return b->spare->id;\n"
+                    "}\n");
+    /* Designated initializers name members with no object expression at all:
+     * the type being initialized says whose member `.open` is. At file scope
+     * (the usual ops table), nested, through an array, in a block and in a
+     * compound literal. Each table file initializes ONE of the two tables. */
+    write_temp_file(tmp, "table_ops.c",
+                    "#include \"ops.h\"\n"
+                    "\n"
+                    "static void my_open(int fd) { (void)fd; }\n"
+                    "static int my_shut(int fd) { return fd; }\n"
+                    "\n"
+                    "static struct Ops table_ops = {\n"
+                    "    .open = my_open,\n"
+                    "    .shut = my_shut,\n"
+                    "};\n"
+                    "\n"
+                    "static struct Bank bank_init = {\n"
+                    "    .fixed = { [0] = { .ops = &table_ops } },\n"
+                    "    .id = 3,\n"
+                    "};\n");
+    write_temp_file(tmp, "table_other.c",
+                    "#include \"other_ops.h\"\n"
+                    "\n"
+                    "static void their_open(int fd) { (void)fd; }\n"
+                    "\n"
+                    "static struct OtherOps other_table = {\n"
+                    "    .open = their_open,\n"
+                    "};\n");
+    write_temp_file(tmp, "init_local.c",
+                    "#include \"ops.h\"\n"
+                    "#include \"other_ops.h\"\n"
+                    "\n"
+                    "int init_block(void) {\n"
+                    "    struct Dev d = { .id = 1 };\n"
+                    "    return d.id;\n"
+                    "}\n"
+                    "\n"
+                    "void init_literal(struct Bank *b) {\n"
+                    "    *b->devs = (struct Dev){ .id = 2 };\n"
+                    "}\n"
+                    "\n"
+                    "void init_array(void) {\n"
+                    "    struct OtherOps pair[2] = { { .id = 1 }, { .id = 2 } };\n"
+                    "    (void)pair;\n"
+                    "}\n");
     for (int i = 0; i < pad_files; i++) {
         char name[64];
         char body[128];
@@ -6935,6 +7124,80 @@ static int assert_c_member_fields_bind_by_type(cbm_store_t *s, const char *proje
     /* A bare C call of a parameter named `alpha_only` and a shell command of
      * that name are not calls of the struct member, however unique the name. */
     ASSERT_EQ(field_inbound_edge_count(s, project, "Alpha", "alpha_only", "CALLS"), 0);
+    /* `p->f(...)` through an inline pointer-to-function member: the call lands
+     * on the member of the pointed-to struct, never on the same-named member
+     * of the other table. */
+    ASSERT_GTE(fixture_node_count(s, project, "ops.h", "open", "Field"), 1);
+    ASSERT_GTE(fixture_node_count(s, project, "other_ops.h", "open", "Field"), 1);
+    ASSERT_TRUE(field_edge_exists(s, project, "arrow_ops", "Ops", "open", "CALLS"));
+    ASSERT_FALSE(field_edge_exists(s, project, "arrow_ops", "OtherOps", "open", "CALLS"));
+    ASSERT_TRUE(field_edge_exists(s, project, "arrow_other", "OtherOps", "open", "CALLS"));
+    ASSERT_FALSE(field_edge_exists(s, project, "arrow_other", "Ops", "open", "CALLS"));
+    /* The object of the call is itself a member access whose member is typed
+     * `struct Ops *`: both steps of the chain are typed. */
+    ASSERT_TRUE(field_edge_exists(s, project, "arrow_chain", "Dev", "ops", "USAGE"));
+    ASSERT_TRUE(field_edge_exists(s, project, "arrow_chain", "Ops", "shut", "CALLS"));
+    ASSERT_FALSE(field_edge_exists(s, project, "arrow_chain", "OtherOps", "shut", "CALLS"));
+    /* A call through a pointer-to-function member has that member's return
+     * type: `o->owner(4)->id` is the `id` of struct Dev. */
+    ASSERT_TRUE(field_edge_exists(s, project, "arrow_ret", "Ops", "owner", "CALLS"));
+    ASSERT_TRUE(field_edge_exists(s, project, "arrow_ret", "Dev", "id", "USAGE"));
+    ASSERT_FALSE(field_edge_exists(s, project, "arrow_ret", "OtherOps", "id", "USAGE"));
+    /* A pointer member and an array member have an element type, and the
+     * second declarator of `struct Dev *devs, *spare;` is a member too. `id`
+     * is a name three structs share, so each of these needs the full chain. */
+    ASSERT_TRUE(field_edge_exists(s, project, "index_ptr", "Bank", "devs", "USAGE"));
+    ASSERT_TRUE(field_edge_exists(s, project, "index_ptr", "Dev", "id", "USAGE"));
+    ASSERT_FALSE(field_edge_exists(s, project, "index_ptr", "Bank", "id", "USAGE"));
+    ASSERT_TRUE(field_edge_exists(s, project, "index_arr", "Bank", "fixed", "USAGE"));
+    ASSERT_TRUE(field_edge_exists(s, project, "index_arr", "Dev", "id", "USAGE"));
+    ASSERT_TRUE(field_edge_exists(s, project, "second_decl", "Bank", "spare", "USAGE"));
+    ASSERT_TRUE(field_edge_exists(s, project, "second_decl", "Dev", "id", "USAGE"));
+    /* The same rule inside a header's inline functions. */
+    ASSERT_TRUE(field_edge_exists(s, project, "hdr_alpha", "Alpha", "count", "USAGE"));
+    ASSERT_FALSE(field_edge_exists(s, project, "hdr_alpha", "Beta", "count", "USAGE"));
+    ASSERT_TRUE(field_edge_exists(s, project, "hdr_beta", "Beta", "count", "USAGE"));
+    ASSERT_FALSE(field_edge_exists(s, project, "hdr_beta", "Alpha", "count", "USAGE"));
+    ASSERT_TRUE(field_edge_exists(s, project, "hdr_beta", "Beta", "count", "WRITES"));
+    ASSERT_FALSE(field_edge_exists(s, project, "hdr_beta", "Alpha", "count", "WRITES"));
+    /* A struct the header declares itself, by typedef or by tag. */
+    ASSERT_TRUE(field_edge_exists(s, project, "hdr_own_typedef", "HdrBuf", "count", "USAGE"));
+    ASSERT_FALSE(field_edge_exists(s, project, "hdr_own_typedef", "Alpha", "count", "USAGE"));
+    ASSERT_TRUE(field_edge_exists(s, project, "hdr_own_struct", "HdrNode", "count", "USAGE"));
+    ASSERT_FALSE(field_edge_exists(s, project, "hdr_own_struct", "Beta", "count", "USAGE"));
+    /* ...and inside `#ifdef` / `#else` branches. */
+    ASSERT_TRUE(field_edge_exists(s, project, "guarded_alpha", "Alpha", "count", "USAGE"));
+    ASSERT_FALSE(field_edge_exists(s, project, "guarded_alpha", "Beta", "count", "USAGE"));
+    ASSERT_TRUE(field_edge_exists(s, project, "guarded_beta", "Beta", "count", "USAGE"));
+    ASSERT_FALSE(field_edge_exists(s, project, "guarded_beta", "Alpha", "count", "USAGE"));
+    /* An untyped member call binds the project's one member of that name in
+     * C, and nothing in a C++ source. */
+    ASSERT_GTE(fixture_node_count(s, project, "cb.h", "only_cb", "Field"), 1);
+    ASSERT_TRUE(field_edge_exists(s, project, "c_untyped_call", "CbTable", "only_cb", "CALLS"));
+    ASSERT_FALSE(field_edge_exists(s, project, "cpp_untyped_call", "CbTable", "only_cb", "CALLS"));
+    /* A global behind `#ifndef` types the accesses through it. */
+    ASSERT_TRUE(field_edge_exists(s, project, "read_alpha_global", "Alpha", "count", "USAGE"));
+    ASSERT_FALSE(field_edge_exists(s, project, "read_alpha_global", "Beta", "count", "USAGE"));
+    ASSERT_TRUE(field_edge_exists(s, project, "read_beta_global", "Beta", "count", "USAGE"));
+    ASSERT_FALSE(field_edge_exists(s, project, "read_beta_global", "Alpha", "count", "USAGE"));
+    /* Designated initializers at file scope: the source is the file. */
+    ASSERT_TRUE(field_edge_exists(s, project, "table_ops.c", "Ops", "open", "USAGE"));
+    ASSERT_TRUE(field_edge_exists(s, project, "table_ops.c", "Ops", "shut", "USAGE"));
+    ASSERT_FALSE(field_edge_exists(s, project, "table_ops.c", "OtherOps", "open", "USAGE"));
+    ASSERT_TRUE(field_edge_exists(s, project, "table_other.c", "OtherOps", "open", "USAGE"));
+    ASSERT_FALSE(field_edge_exists(s, project, "table_other.c", "Ops", "open", "USAGE"));
+    /* Nested: `.fixed = { [0] = { .ops = ... } }` initializes a Dev. */
+    ASSERT_TRUE(field_edge_exists(s, project, "table_ops.c", "Bank", "fixed", "USAGE"));
+    ASSERT_TRUE(field_edge_exists(s, project, "table_ops.c", "Dev", "ops", "USAGE"));
+    ASSERT_TRUE(field_edge_exists(s, project, "table_ops.c", "Bank", "id", "USAGE"));
+    ASSERT_FALSE(field_edge_exists(s, project, "table_ops.c", "Dev", "id", "USAGE"));
+    /* In a block, in a compound literal, and per element of an array. */
+    ASSERT_TRUE(field_edge_exists(s, project, "init_block", "Dev", "id", "USAGE"));
+    ASSERT_FALSE(field_edge_exists(s, project, "init_block", "Bank", "id", "USAGE"));
+    ASSERT_TRUE(field_edge_exists(s, project, "init_literal", "Dev", "id", "USAGE"));
+    ASSERT_FALSE(field_edge_exists(s, project, "init_literal", "OtherOps", "id", "USAGE"));
+    ASSERT_TRUE(field_edge_exists(s, project, "init_array", "OtherOps", "id", "USAGE"));
+    ASSERT_FALSE(field_edge_exists(s, project, "init_array", "Dev", "id", "USAGE"));
     return 0;
 }
 

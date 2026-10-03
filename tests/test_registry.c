@@ -1070,6 +1070,22 @@ TEST(call_onto_field_follows_language_and_shape) {
     PASS();
 }
 
+TEST(c_arrow_member_call_is_c_family_and_arrow_only) {
+    /* The registry returns nothing for an arrow callee; these are the calls
+     * the resolvers then hand to the object's type. */
+    ASSERT_TRUE(cbm_c_arrow_member_call(CBM_LANG_C, "o->open"));
+    ASSERT_TRUE(cbm_c_arrow_member_call(CBM_LANG_C, "d->ops->shut"));
+    ASSERT_TRUE(cbm_c_arrow_member_call(CBM_LANG_CPP, "self->hook"));
+    /* A dot call resolves through the registry and its Field policy. */
+    ASSERT_FALSE(cbm_c_arrow_member_call(CBM_LANG_C, "cb.close"));
+    ASSERT_FALSE(cbm_c_arrow_member_call(CBM_LANG_C, "socket"));
+    ASSERT_FALSE(cbm_c_arrow_member_call(CBM_LANG_C, NULL));
+    /* Perl and PHP spell method calls with an arrow too: not this rule. */
+    ASSERT_FALSE(cbm_c_arrow_member_call(CBM_LANG_PERL, "$obj->method"));
+    ASSERT_FALSE(cbm_c_arrow_member_call(CBM_LANG_PHP, "$this->save"));
+    PASS();
+}
+
 TEST(unique_field_qn_needs_exactly_one_field_of_that_name) {
     /* What an untyped C member access may still bind: a name exactly one
      * Field carries. Two Fields would be a choice; a function or variable of
@@ -1114,6 +1130,24 @@ TEST(c_member_access_binds_by_owner_only) {
      * own members without a selector, and Go has its own rule above. */
     ASSERT_FALSE(cbm_c_member_binds_by_owner(false, true));
     ASSERT_FALSE(cbm_c_member_binds_by_owner(false, false));
+    PASS();
+}
+
+TEST(c_member_rule_covers_c_files_and_every_dot_h) {
+    ASSERT_TRUE(cbm_c_member_rule_file(CBM_LANG_C, "src/a.c"));
+    ASSERT_TRUE(cbm_c_member_rule_file(CBM_LANG_C, NULL));
+    /* A header is classified C++ whatever it holds; its inline functions
+     * access members like the .c files that include it. */
+    ASSERT_TRUE(cbm_c_member_rule_file(CBM_LANG_CPP, "include/linux/list.h"));
+    /* Other C++ files keep their own resolution. */
+    ASSERT_FALSE(cbm_c_member_rule_file(CBM_LANG_CPP, "src/widget.cpp"));
+    ASSERT_FALSE(cbm_c_member_rule_file(CBM_LANG_CPP, "src/widget.hpp"));
+    ASSERT_FALSE(cbm_c_member_rule_file(CBM_LANG_CPP, "src/match.hh"));
+    ASSERT_FALSE(cbm_c_member_rule_file(CBM_LANG_CPP, ".h"));
+    ASSERT_FALSE(cbm_c_member_rule_file(CBM_LANG_CPP, NULL));
+    /* No other language, whatever the file is called. */
+    ASSERT_FALSE(cbm_c_member_rule_file(CBM_LANG_OBJC, "ui/View.h"));
+    ASSERT_FALSE(cbm_c_member_rule_file(CBM_LANG_GO, "pkg/a.go"));
     PASS();
 }
 
@@ -1377,8 +1411,10 @@ SUITE(registry) {
     RUN_TEST(cross_language_ref_drops_go_vs_c);
     RUN_TEST(go_bare_ref_never_binds_field);
     RUN_TEST(call_onto_field_follows_language_and_shape);
+    RUN_TEST(c_arrow_member_call_is_c_family_and_arrow_only);
     RUN_TEST(unique_field_qn_needs_exactly_one_field_of_that_name);
     RUN_TEST(c_member_access_binds_by_owner_only);
+    RUN_TEST(c_member_rule_covers_c_files_and_every_dot_h);
     RUN_TEST(dynamic_suppress_drops_weak_method_matches);
     RUN_TEST(dynamic_suppress_keeps_high_confidence_and_non_methods);
     RUN_TEST(python_builtin_member_table_matches_builtin_type_methods);

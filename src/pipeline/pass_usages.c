@@ -168,7 +168,8 @@ static int resolve_usage_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *res
          * the C LSP as field-owner rows, and through nothing else: the bare
          * member name must never reach the short-name registry below. */
         if (usage->kind == CBM_USAGE_VALUE &&
-            cbm_c_member_binds_by_owner(lang == CBM_LANG_C, usage->is_member_access)) {
+            cbm_c_member_binds_by_owner(cbm_c_member_rule_file(lang, rel),
+                                        usage->is_member_access)) {
             cbm_pipeline_lsp_field_cursor_t owners = cbm_pipeline_lsp_field_cursor(
                 &result->resolved_calls, field_index_ready ? &field_index : NULL,
                 usage->enclosing_func_qn, usage->ref_name);
@@ -341,7 +342,7 @@ static int resolve_rw_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *result
         }
 
         /* C member read/write: same owner join as resolve_usage_edges. */
-        if (cbm_c_member_binds_by_owner(lang == CBM_LANG_C, rw->is_member_access)) {
+        if (cbm_c_member_binds_by_owner(cbm_c_member_rule_file(lang, rel), rw->is_member_access)) {
             cbm_pipeline_lsp_field_cursor_t owners = cbm_pipeline_lsp_field_cursor(
                 &result->resolved_calls, field_index_ready ? &field_index : NULL,
                 rw->enclosing_func_qn, rw->var_name);

@@ -25,6 +25,7 @@
 #include "foundation/mem_core.h" /* field-owner index storage */
 #include "graph_buffer/graph_buffer.h"
 #include "foundation/constants.h"
+#include "pipeline/pipeline.h" /* cbm_registry_unique_field_qn, cbm_resolution_t */
 
 #include <ctype.h>
 #include <stdio.h>
@@ -1045,6 +1046,40 @@ static inline const cbm_gbuf_node_t *cbm_pipeline_c_member_call_field(
         }
     }
     return best;
+}
+
+/* Confidence of a member call bound by the type of its object, and of one
+ * bound because the project holds exactly one Field of that name. */
+#define CBM_CONF_MEMBER_TYPED 0.95
+#define CBM_CONF_MEMBER_UNIQUE 0.75
+
+/* The complete rule for a C/C++ member call: the Field the object's type
+ * names; for an object the LSP could not type, the one Field of that name in
+ * the project, where allow_unique_name says the file follows the C member rule
+ * (cbm_c_member_rule_file) -- in other C++ files an untyped `u->size()` is a
+ * method of a type the project does not hold far more often than a call
+ * through some struct's member; otherwise NULL. On a hit *res is rewritten to
+ * that Field. */
+static inline const cbm_gbuf_node_t *cbm_pipeline_c_member_call_resolve(
+    const CBMResolvedCallArray *arr, const cbm_pipeline_lsp_field_index_t *index,
+    const cbm_gbuf_t *gbuf, const cbm_registry_t *registry, const char *project_name,
+    const char *enclosing_func_qn, const char *callee_text, bool allow_unique_name,
+    cbm_resolution_t *res) {
+    bool typed = false;
+    const cbm_gbuf_node_t *field = cbm_pipeline_c_member_call_field(
+        arr, index, gbuf, project_name, enclosing_func_qn, callee_text, &typed);
+    if (!field && !typed && allow_unique_name) {
+        const char *only =
+            cbm_registry_unique_field_qn(registry, cbm_lsp_bare_segment(callee_text));
+        field = only ? cbm_gbuf_find_by_qn(gbuf, only) : NULL;
+    }
+    if (field) {
+        res->qualified_name = field->qualified_name;
+        res->strategy = typed ? "lsp_field_access" : "unique_name";
+        res->confidence = typed ? CBM_CONF_MEMBER_TYPED : CBM_CONF_MEMBER_UNIQUE;
+        res->candidate_count = SKIP_ONE;
+    }
+    return field;
 }
 
 /* Resolve an LSP-emitted callee_qn to a graph-buffer node.

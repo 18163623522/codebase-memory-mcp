@@ -40,6 +40,9 @@ enum {
     NIX_HEADER_HOP_MAX = 8,
     DECORATOR_SCAN_LIMIT = 3,
     C_RETURN_WALK_DEPTH = 5,
+    /* Declarator nesting around a member name: `char *(*(*tbl[4])(int))(void)`
+     * is pointer, function, parens, pointer, function, parens, pointer, array. */
+    C_FIELD_DECL_WALK_DEPTH = 16,
     VAR_RECURSION_LIMIT = 8,
     NESTED_CLASS_STACK_CAP = 128,
     FP_HASH_MUL = 31,    /* FNV-like hash multiplier for identifier dedup */
@@ -3576,9 +3579,10 @@ static bool is_c_declarator_lang(CBMLanguage lang) {
  * O(depth) with no recursion and needs no depth cap. It stops at the first node
  * that is neither a pointer nor a reference declarator: for a function returning
  * a function pointer (`int (*f(void))(int)`) that is the outer
- * function_declarator, which leaves the base type as it was. */
+ * function_declarator, which leaves the base type as it was. That node is
+ * handed back through `rest` when the caller asks for it. */
 static size_t c_rt_render(c_rt_out_t *out, TSNode func_node, TSNode type_node, TSNode declarator,
-                          const char *source) {
+                          const char *source, TSNode *rest) {
     size_t added = 0;
     uint32_t decl_start = ts_node_start_byte(declarator);
     uint32_t nc = ts_node_named_child_count(func_node);
@@ -3632,6 +3636,9 @@ static size_t c_rt_render(c_rt_out_t *out, TSNode func_node, TSNode type_node, T
         }
         decl = inner;
     }
+    if (rest) {
+        *rest = decl; /* the declarator the markers wrap; null when none is left */
+    }
     return added;
 }
 
@@ -3645,7 +3652,7 @@ static char *c_declared_return_type(CBMExtractCtx *ctx, TSNode func_node, TSNode
         return cbm_node_text(a, type_node, ctx->source);
     }
     c_rt_out_t out = {NULL, 0};
-    if (c_rt_render(&out, func_node, type_node, declarator, ctx->source) == 0) {
+    if (c_rt_render(&out, func_node, type_node, declarator, ctx->source, NULL) == 0) {
         return cbm_node_text(a, type_node, ctx->source);
     }
     out.buf = (char *)cbm_arena_alloc(a, out.len + NULL_TERM);
@@ -3653,7 +3660,7 @@ static char *c_declared_return_type(CBMExtractCtx *ctx, TSNode func_node, TSNode
         return cbm_node_text(a, type_node, ctx->source);
     }
     out.len = 0;
-    (void)c_rt_render(&out, func_node, type_node, declarator, ctx->source);
+    (void)c_rt_render(&out, func_node, type_node, declarator, ctx->source, NULL);
     out.buf[out.len] = '\0';
     return out.buf;
 }
@@ -6927,6 +6934,196 @@ static bool is_func_ptr_field(TSNode field) {
     return false;
 }
 
+/* ── C-family member declarations ───────────────────────────────────
+ * `type declarator, declarator;` in a struct/union/class body. Each declarator
+ * is one member: its name is the identifier at the bottom of the declarator,
+ * its type everything around that identifier. */
+
+/* The name of one member declarator, or a null node when the declarator is not
+ * a data member. A member FUNCTION declaration has the same field_declaration
+ * + function_declarator shape as a pointer-to-function member; the two differ
+ * in what the function_declarator wraps: `(*open)` is a parenthesized pointer
+ * declarator, `resize` (or `(resize)`) a name. */
+static TSNode c_member_declarator_name(TSNode decl) {
+    TSNode null_node = {0};
+    bool need_pointer = false;
+    for (int depth = 0; depth < C_FIELD_DECL_WALK_DEPTH && !ts_node_is_null(decl); depth++) {
+        const char *kind = ts_node_type(decl);
+        if (strcmp(kind, "field_identifier") == 0 || strcmp(kind, "identifier") == 0) {
+            return need_pointer ? null_node : decl;
+        }
+        TSNode inner = ts_node_child_by_field_name(decl, TS_FIELD("declarator"));
+        bool first_child = false;
+        if (strcmp(kind, "function_declarator") == 0) {
+            if (ts_node_is_null(inner) ||
+                strcmp(ts_node_type(inner), "parenthesized_declarator") != 0) {
+                return null_node; /* a member function declaration */
+            }
+            need_pointer = true;
+        } else if (strstr(kind, "pointer_declarator") != NULL ||
+                   strcmp(kind, "reference_declarator") == 0) {
+            need_pointer = false;
+        } else if (strcmp(kind, "attributed_declarator") == 0) {
+            first_child = true; /* the declarator, then its attributes */
+        } else if (strcmp(kind, "array_declarator") != 0 &&
+                   strcmp(kind, "parenthesized_declarator") != 0) {
+            return null_node; /* operator, destructor, qualified name, ... */
+        }
+        if (ts_node_is_null(inner)) {
+            /* No `declarator` field: a parenthesized declarator holds it last
+             * (after an optional calling-convention modifier), a reference
+             * declarator as its only named child. */
+            uint32_t named = ts_node_named_child_count(decl);
+            for (uint32_t k = 0; k < named; k++) {
+                TSNode cand = ts_node_named_child(decl, first_child ? k : named - SKIP_ONE - k);
+                if (strcmp(ts_node_type(cand), "comment") != 0) {
+                    inner = cand;
+                    break;
+                }
+            }
+        }
+        decl = inner;
+    }
+    return null_node;
+}
+
+/* Type of one member declarator: the canonical prefix a return type gets from
+ * c_rt_render (cv-qualifiers, base type, pointer/reference markers), then the
+ * declarator that is left with the member name cut out, which is how C spells
+ * an abstract declarator: `int [8]`, `char *[4]`, `void (*)(int fd)`.
+ * Whitespace runs in that remainder collapse to one space; a `|` in it (the
+ * separator of the field list the cross-file registry is fed) drops it. */
+static char *c_member_type_text(CBMExtractCtx *ctx, TSNode field, TSNode type_node, TSNode decl,
+                                TSNode name_node) {
+    CBMArena *a = ctx->arena;
+    const char *src = ctx->source;
+    TSNode rest = decl;
+    c_rt_out_t out = {NULL, 0};
+    (void)c_rt_render(&out, field, type_node, decl, src, &rest);
+    uint32_t rest_start = ts_node_is_null(rest) ? 0 : ts_node_start_byte(rest);
+    uint32_t rest_end = ts_node_is_null(rest) ? 0 : ts_node_end_byte(rest);
+    uint32_t cut_start = ts_node_start_byte(name_node);
+    uint32_t cut_end = ts_node_end_byte(name_node);
+    /* prefix + one separating space + remainder + NUL */
+    char *buf = (char *)cbm_arena_alloc(a, out.len + (size_t)(rest_end - rest_start) + PAIR_LEN);
+    if (!buf) {
+        return cbm_node_text(a, type_node, src);
+    }
+    out.buf = buf;
+    out.len = 0;
+    (void)c_rt_render(&out, field, type_node, decl, src, NULL);
+    size_t prefix_len = out.len;
+    size_t n = prefix_len;
+    bool pending_space = n > 0 && buf[n - SKIP_ONE] != '*' && buf[n - SKIP_ONE] != '&';
+    bool wrote_rest = false;
+    for (uint32_t i = rest_start; i < rest_end; i++) {
+        if (i >= cut_start && i < cut_end) {
+            continue;
+        }
+        char c = src[i];
+        if (c == '|') {
+            n = prefix_len;
+            break;
+        }
+        if (c == ' ' || c == '\n' || c == '\r' || c == '\t') {
+            pending_space = pending_space || wrote_rest;
+            continue;
+        }
+        if (pending_space) {
+            buf[n++] = ' ';
+            pending_space = false;
+        }
+        buf[n++] = c;
+        wrote_rest = true;
+    }
+    buf[n] = '\0';
+    return buf;
+}
+
+/* True when `field` is a C-family member declaration: a type and at least one
+ * declarator. An anonymous struct/union member has no declarator and is left
+ * to the caller. */
+static bool is_c_member_declaration(CBMExtractCtx *ctx, TSNode field) {
+    if (!is_c_declarator_lang(ctx->language) ||
+        strcmp(ts_node_type(field), "field_declaration") != 0) {
+        return false;
+    }
+    return !ts_node_is_null(ts_node_child_by_field_name(field, TS_FIELD("type"))) &&
+           !ts_node_is_null(ts_node_child_by_field_name(field, TS_FIELD("declarator")));
+}
+
+/* A member whose type is a macro invocation (`ql_head(tcache_slow_t)
+ * tcache_ql;`). The C grammar reads the type as a macro_type_specifier; the
+ * C++ grammar, which every header gets, reads `(tcache_slow_t)` as a
+ * parenthesized declarator and leaves the member's real name in an ERROR node
+ * behind it. Returns that name, or a null node for any other shape. */
+static TSNode c_macro_typed_member_name(TSNode decl) {
+    TSNode null_node = {0};
+    if (strcmp(ts_node_type(decl), "parenthesized_declarator") != 0) {
+        return null_node;
+    }
+    TSNode err = ts_node_next_sibling(decl);
+    if (ts_node_is_null(err) || strcmp(ts_node_type(err), "ERROR") != 0 ||
+        ts_node_named_child_count(err) != SKIP_ONE) {
+        return null_node;
+    }
+    TSNode name = ts_node_named_child(err, 0);
+    const char *kind = ts_node_type(name);
+    if (strcmp(kind, "identifier") != 0 && strcmp(kind, "field_identifier") != 0) {
+        return null_node;
+    }
+    return name;
+}
+
+/* One Field per data-member declarator of a C-family member declaration. */
+static void extract_c_member_fields(CBMExtractCtx *ctx, TSNode field, const char *class_qn,
+                                    const CBMLangSpec *spec) {
+    CBMArena *a = ctx->arena;
+    TSNode type_node = ts_node_child_by_field_name(field, TS_FIELD("type"));
+    uint32_t nc = ts_node_child_count(field);
+    for (uint32_t i = 0; i < nc; i++) {
+        const char *field_name = ts_node_field_name_for_child(field, i);
+        if (!field_name || strcmp(field_name, "declarator") != 0) {
+            continue;
+        }
+        TSNode decl = ts_node_child(field, i);
+        char *name = NULL;
+        char *type_text = NULL;
+        TSNode macro_name = c_macro_typed_member_name(decl);
+        if (!ts_node_is_null(macro_name)) {
+            /* The type is the macro invocation: the `type` node through the
+             * misread declarator. */
+            uint32_t start = ts_node_start_byte(type_node);
+            uint32_t end = ts_node_end_byte(decl);
+            name = cbm_node_text(a, macro_name, ctx->source);
+            type_text = end > start ? cbm_arena_strndup(a, ctx->source + start, end - start) : NULL;
+        } else {
+            TSNode name_node = c_member_declarator_name(decl);
+            if (ts_node_is_null(name_node)) {
+                continue;
+            }
+            name = cbm_node_text(a, name_node, ctx->source);
+            type_text = c_member_type_text(ctx, field, type_node, decl, name_node);
+        }
+        if (!name || !name[0] || !type_text || !type_text[0]) {
+            continue;
+        }
+        CBMDefinition def;
+        memset(&def, 0, sizeof(def));
+        def.name = name;
+        def.qualified_name = cbm_arena_sprintf(a, "%s.%s", class_qn, name);
+        def.label = "Field";
+        def.file_path = ctx->rel_path;
+        def.parent_class = class_qn;
+        def.return_type = type_text;
+        def.start_line = ts_node_start_point(field).row + TS_LINE_OFFSET;
+        def.end_line = ts_node_end_point(field).row + TS_LINE_OFFSET;
+        def.is_exported = cbm_is_exported(name, ctx->language);
+        def.decorators = extract_decorators(a, field, ctx->source, ctx->language, spec);
+        cbm_defs_push(&ctx->result->defs, a, def);
+    }
+}
+
 // Resolve the name node for a field declaration, unwrapping C pointer/array declarators.
 static TSNode resolve_field_name_node(TSNode child) {
     TSNode name_node = ts_node_child_by_field_name(child, TS_FIELD("declarator"));
@@ -7028,6 +7225,11 @@ static void extract_class_fields(CBMExtractCtx *ctx, TSNode class_node, const ch
         }
 
         if (!cbm_kind_in_set(child, spec->field_node_types)) {
+            continue;
+        }
+
+        if (is_c_member_declaration(ctx, child)) {
+            extract_c_member_fields(ctx, child, class_qn, spec);
             continue;
         }
 
