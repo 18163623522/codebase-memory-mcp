@@ -12904,18 +12904,19 @@ int cbm_cmd_uninstall(int argc, char **argv) {
      * cannot auto-confirm the destruction we are trying to prevent. */
     for (int i = 0; i < argc; i++) {
         if (argv && argv[i] && (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0)) {
-            printf("Usage: codebase-memory-mcp uninstall [options]\n\n"
-                   "Removes the codebase-memory-mcp binary and its agent configurations.\n"
-                   "THIS IS DESTRUCTIVE. Project indexes are kept by default. An interactive\n"
-                   "terminal is asked separately; the default answer is to keep them.\n\n"
-                   "Options:\n"
-                   "  --dry-run          Show what would be removed, change nothing\n"
-                   "  --dir=PATH         Uninstall from a custom install directory\n"
-                   "  --delete-indexes   Also delete every project index (overrides --no)\n"
-                   "  -y, --yes          Do not prompt; indexes are kept unless explicitly deleted\n"
-                   "  -n, --no           Decline prompts; --delete-indexes still takes precedence\n"
-                   "  -h, --help         Show this help and exit\n\n"
-                   "Run with --dry-run first if you are unsure.\n");
+            printf(
+                "Usage: codebase-memory-mcp uninstall [options]\n\n"
+                "Removes the codebase-memory-mcp binary and its agent configurations.\n"
+                "THIS IS DESTRUCTIVE. Project indexes are kept by default. An interactive\n"
+                "terminal is asked separately; the default answer is to keep them.\n\n"
+                "Options:\n"
+                "  --dry-run          Show what would be removed, change nothing\n"
+                "  --dir=PATH         Uninstall from a custom install directory\n"
+                "  --delete-indexes   Also delete every project index (overrides --no)\n"
+                "  -y, --yes          Do not prompt; indexes are kept unless explicitly deleted\n"
+                "  -n, --no           Decline prompts; --delete-indexes still takes precedence\n"
+                "  -h, --help         Show this help and exit\n\n"
+                "Run with --dry-run first if you are unsure.\n");
             return CLI_OK;
         }
     }
