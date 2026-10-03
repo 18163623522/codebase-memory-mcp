@@ -79,11 +79,15 @@ endif
 # and every counter compiled in is written out again for every test. Like every
 # other flavour it needs its own BUILD_DIR; the test-runner-cov and cbm-cov
 # targets pin one.
+# -fprofile-continuous: a child process started with `%c` in LLVM_PROFILE_FILE
+# keeps its counters mapped onto its profile file, so a child that is killed
+# still leaves a complete profile. Linux needs the flag for `%c` to work at
+# all; with it macOS behaves the same way (tests/test_main.c, "Children").
 TEST_COVERAGE ?= 0
 TEST_COVERAGE_FLAGS :=
 TEST_COVERAGE_DEFINE :=
 ifeq ($(TEST_COVERAGE),1)
-TEST_COVERAGE_FLAGS := -fprofile-instr-generate -fcoverage-mapping
+TEST_COVERAGE_FLAGS := -fprofile-instr-generate -fcoverage-mapping -fprofile-continuous
 TEST_COVERAGE_DEFINE := -DCBM_TEST_COVERAGE=1
 endif
 
@@ -327,6 +331,7 @@ FOUNDATION_SRCS = \
     src/foundation/str_util.c \
     src/foundation/workspace.c \
     src/foundation/platform.c \
+    src/foundation/path_syntax_internal.c \
     src/foundation/system_info.c \
     src/foundation/slab_alloc.c \
     src/foundation/yaml.c \
@@ -417,13 +422,15 @@ PREPROCESSOR_SRC = $(CBM_DIR)/preprocessor.cpp
 SQLITE_WRITER_SRC = $(CBM_DIR)/sqlite_writer.c
 
 # Store module (new)
-STORE_SRCS = src/store/store.c
+STORE_SRCS = src/store/store.c src/store/store_impact.c src/store/store_graph_digest.c
 
 # Cypher module (new)
 CYPHER_SRCS = src/cypher/cypher.c
 
 # MCP server module (new)
-MCP_SRCS = src/mcp/mcp.c src/mcp/index_supervisor.c src/mcp/compact_out.c
+MCP_SRCS = src/mcp/mcp.c src/mcp/index_supervisor.c src/mcp/compact_out.c \
+	src/mcp/test_impact.c src/mcp/test_impact_diff.c src/mcp/test_impact_changes.c src/mcp/test_impact_origins.c src/mcp/test_impact_coverage.c src/mcp/test_impact_config.c src/mcp/test_impact_select.c src/mcp/test_impact_policy.c src/mcp/test_impact_git.c src/mcp/test_impact_inventory.c src/mcp/test_impact_inventory_input.c src/mcp/test_impact_tree.c src/mcp/test_impact_tree_audit.c src/mcp/test_impact_tree_read.c src/mcp/test_impact_tree_batch.c src/mcp/test_impact_tree_digest.c src/mcp/test_impact_tree_names.c src/mcp/test_impact_tree_plan.c src/mcp/test_impact_tree_posix.c src/mcp/test_impact_tree_posix_acl.c src/mcp/test_impact_tree_posix_io.c src/mcp/test_impact_tree_util.c src/mcp/test_impact_tree_windows.c src/mcp/test_impact_tree_windows_acl.c src/mcp/test_impact_tree_windows_io.c \
+	src/mcp/test_impact_result.c src/mcp/test_impact_result_json.c src/mcp/test_impact_result_project.c src/mcp/test_impact_result_receipt.c src/mcp/test_impact_result_rows.c src/mcp/test_impact_result_util.c src/mcp/test_impact_result_validate.c src/mcp/test_impact_result_wire.c
 
 # Shared MCP daemon coordination and local transport
 DAEMON_SRCS = \
@@ -442,7 +449,18 @@ DAEMON_SRCS = \
 DISCOVER_SRCS = \
     src/discover/language.c \
     src/discover/userconfig.c \
+    src/discover/test_conventions.c \
     src/discover/gitignore.c \
+    src/discover/gitignore_checked.c \
+    src/discover/inventory_filter.c \
+    src/discover/inventory.c \
+    src/discover/inventory_guard.c \
+    src/discover/inventory_metadata.c \
+    src/discover/inventory_directories.c \
+    src/discover/inventory_controls.c \
+    src/discover/gitignore_checked_parse.c \
+    src/discover/gitignore_core.c \
+    src/discover/gitignore_guard.c \
     src/discover/discover.c
 
 # Graph buffer module (new)
@@ -633,6 +651,8 @@ PROJECT_HDRS = $(wildcard src/*.h src/*/*.h $(CBM_DIR)/*.h $(CBM_DIR)/lsp/*.h te
 
 TEST_FOUNDATION_SRCS = \
     tests/test_main.c \
+    tests/test_coverage_children.c \
+    tests/test_coverage_parent_failure.c \
     tests/test_arena.c \
     tests/test_hash_table.c \
     tests/test_dyn_array.c \
@@ -651,6 +671,7 @@ TEST_FOUNDATION_SRCS = \
 
 TEST_EXTRACTION_SRCS = \
     tests/test_extraction.c \
+    tests/test_test_conventions.c \
     tests/test_extraction_inheritance.c \
     tests/test_extraction_imports.c \
     tests/test_parse_coverage.c \
@@ -662,6 +683,9 @@ TEST_EXTRACTION_SRCS = \
 TEST_STORE_SRCS = \
     tests/test_store_nodes.c \
     tests/test_store_edges.c \
+    tests/test_store_impact.c \
+    tests/test_store_scope.c \
+    tests/test_store_graph_digest.c \
     tests/test_store_search.c \
     tests/test_store_arch.c \
     tests/test_store_bulk.c \
@@ -674,6 +698,18 @@ TEST_CYPHER_SRCS = \
 
 TEST_MCP_SRCS = \
     tests/test_mcp.c \
+    tests/test_test_impact.c \
+    tests/test_test_impact_profiles.c \
+    tests/test_test_impact_changes.c \
+    tests/test_test_impact_origins.c \
+    tests/test_test_impact_git.c \
+    tests/test_test_impact_tree.c \
+    tests/test_test_impact_inventory.c \
+    tests/test_test_impact_inventory_errors.c \
+    tests/test_test_impact_inventory_support.c \
+    tests/test_test_impact_runner_filter.c \
+    tests/test_test_impact_runner_filter_fixture.c \
+    tests/test_test_impact_runner_filter_process.c \
     tests/test_index_supervisor.c
 
 TEST_DAEMON_SRCS = \
@@ -691,12 +727,23 @@ TEST_DISCOVER_SRCS = \
     tests/test_language.c \
     tests/test_userconfig.c \
     tests/test_gitignore.c \
+    tests/test_gitignore_checked.c \
+    tests/if_native_git_path.c \
+    tests/test_inventory_filter.c \
+    tests/test_inventory_filter_cases.c \
+    tests/test_inventory_filter_errors.c \
+    tests/test_inventory_filter_limits.c \
+    tests/test_inventory_filter_native.c \
+    tests/test_inventory_filter_native_fixture.c \
+    tests/test_inventory_filter_native_platform.c \
+    tests/test_inventory_filter_structure_extra.c \
+    tests/test_inventory_filter_support.c \
     tests/test_git_context.c \
     tests/test_discover.c
 
 TEST_GRAPH_BUFFER_SRCS = tests/test_graph_buffer.c
 
-TEST_PIPELINE_SRCS = tests/test_registry.c tests/test_pipeline.c tests/test_importance.c tests/test_cross_repo.c tests/test_fqn.c tests/test_route_canon.c tests/test_path_alias.c tests/test_configlink.c tests/test_doclinks.c tests/test_infrascan.c tests/test_worker_pool.c tests/test_parallel.c tests/test_index_resilience.c tests/test_index_format.c tests/test_call_reference_contract.c tests/repro/repro_call_scope_usages.c tests/repro/repro_call_argument_usages.c tests/repro/repro_reference_precision.c tests/repro/repro_lexical_binding_precision.c tests/repro/repro_call_argument_matrix_a.c tests/repro/repro_call_argument_matrix_b.c tests/repro/repro_call_node_behaviors.c tests/repro/repro_language_registry.c tests/repro/repro_call_node_manifest.c tests/repro/repro_lsp_ordered_signatures.c tests/repro/repro_lsp_ordered_local.c tests/repro/repro_ts_overload_return_chains.c tests/repro/repro_harness_cleanup.c tests/repro/repro_runner_filter.c
+TEST_PIPELINE_SRCS = tests/test_registry.c tests/test_pipeline.c tests/test_pipeline_conventions.c tests/test_pipeline_frozen.c tests/test_importance.c tests/test_cross_repo.c tests/test_fqn.c tests/test_route_canon.c tests/test_path_alias.c tests/test_configlink.c tests/test_doclinks.c tests/test_infrascan.c tests/test_worker_pool.c tests/test_parallel.c tests/test_index_resilience.c tests/test_index_format.c tests/test_call_reference_contract.c tests/repro/repro_call_scope_usages.c tests/repro/repro_call_argument_usages.c tests/repro/repro_reference_precision.c tests/repro/repro_lexical_binding_precision.c tests/repro/repro_call_argument_matrix_a.c tests/repro/repro_call_argument_matrix_b.c tests/repro/repro_call_node_behaviors.c tests/repro/repro_language_registry.c tests/repro/repro_call_node_manifest.c tests/repro/repro_lsp_ordered_signatures.c tests/repro/repro_lsp_ordered_local.c tests/repro/repro_ts_overload_return_chains.c tests/repro/repro_harness_cleanup.c tests/repro/repro_runner_filter.c
 
 TEST_WATCHER_SRCS = tests/test_watcher.c
 
@@ -869,7 +916,7 @@ PP_OBJ_TSAN = $(BUILD_DIR)/tsan_preprocessor.o
 
 # ── Targets ──────────────────────────────────────────────────────
 
-.PHONY: test test-par test-repro test-foundation test-tsan test-daemon-smoke test-runner-cov cbm-cov cbm cbm-with-ui frontend embed clean-c lint lint-tidy lint-tidy-diff lint-cppcheck lint-format security fuzz
+.PHONY: test-coverage-flush test test-par test-repro test-foundation test-tsan test-daemon-smoke test-runner-cov cbm-cov cbm cbm-with-ui frontend embed clean-c lint lint-tidy lint-tidy-diff lint-cppcheck lint-format security fuzz
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -1406,6 +1453,60 @@ test-runner-cov:
 	$(COV_MAKE) $(COV_BUILD_DIR)/test-runner
 cbm-cov:
 	$(COV_MAKE) $(COV_BUILD_DIR)/codebase-memory-mcp TEST_SEAMS=1
+
+# Genuine LLVM write failures must fail the parent coverage run.
+test-coverage-flush: test-runner-cov
+	@evidence_dir=$$(mktemp -d "$(COV_BUILD_DIR)/coverage-flush.XXXXXX") && \
+		printf 'Coverage flush evidence: %s/proof\n' "$$evidence_dir" && \
+		python3 tests/test_coverage_flush.py \
+			--runner "$(COV_BUILD_DIR)/test-runner" \
+			--llvm-profdata "$(COV_LLVM_BIN)/llvm-profdata" \
+			--output-dir "$$evidence_dir/proof"
+
+.PHONY: test-coverage-children
+# Genuine child profile/marker and setup-reducer controls; evidence is retained.
+test-coverage-children: test-runner-cov
+	@evidence_dir=$$(mktemp -d "$(COV_BUILD_DIR)/coverage-children.XXXXXX") && \
+		printf 'Coverage child evidence: %s/proof\n' "$$evidence_dir" && \
+		python3 tests/test_coverage_children.py \
+			--runner "$(COV_BUILD_DIR)/test-runner" \
+			--llvm-profdata "$(COV_LLVM_BIN)/llvm-profdata" \
+			--reducer scripts/test-impact/coverage-map.py \
+			--output-dir "$$evidence_dir/proof"
+
+.PHONY: test-coverage-parent-failure
+# Positive default plus genuine owned EMFILE; all evidence is retained.
+test-coverage-parent-failure: test-runner-cov
+	@evidence_dir=$$(mktemp -d "$(COV_BUILD_DIR)/coverage-parent-failure.XXXXXX") && \
+		printf 'Coverage parent failure evidence: %s/proof\n' "$$evidence_dir" && \
+		python3 tests/test_coverage_parent_failure.py \
+			--runner "$(COV_BUILD_DIR)/test-runner" \
+			--llvm-profdata "$(COV_LLVM_BIN)/llvm-profdata" \
+			--reducer scripts/test-impact/coverage-map.py \
+			--output-dir "$$evidence_dir/proof"
+
+.PHONY: test-coverage-terminal
+# A readable stale terminal profile cannot hide a failed parent write.
+test-coverage-terminal: test-runner-cov
+	@evidence_dir=$$(mktemp -d "$(COV_BUILD_DIR)/coverage-terminal.XXXXXX") && \
+		printf 'Coverage terminal evidence: %s/proof\n' "$$evidence_dir" && \
+		python3 tests/test_coverage_terminal.py \
+			--runner "$(COV_BUILD_DIR)/test-runner" \
+			--llvm-profdata "$(COV_LLVM_BIN)/llvm-profdata" \
+			--helper tests/test_coverage_children.py \
+			--reducer scripts/test-impact/coverage-map.py \
+			--output-dir "$$evidence_dir/proof"
+
+.PHONY: test-coverage-live-v2
+# Native full-identity transport remains explicitly unadmitted; evidence is retained.
+test-coverage-live-v2: test-runner-cov
+	@evidence_dir=$$(mktemp -d "$(COV_BUILD_DIR)/coverage-live-v2.XXXXXX") && \
+		printf 'Coverage live-v2 evidence: %s/proof\n' "$$evidence_dir" && \
+		PYTHONDONTWRITEBYTECODE=1 python3 tests/test_coverage_live_v2.py \
+			--collector scripts/test-impact/coverage-map.py \
+			--runner "$(COV_BUILD_DIR)/test-runner" \
+			--llvm-profdata "$(COV_LLVM_BIN)/llvm-profdata" \
+			--output "$$evidence_dir/proof" $(if $(COV_LIVE_V2_CASE),--case "$(COV_LIVE_V2_CASE)")
 
 # ── Coverage-guided fuzzing (libFuzzer) ─────────────────────────
 # One binary, three targets (tests/fuzz/cbm_fuzz.c): the per-file extractor,

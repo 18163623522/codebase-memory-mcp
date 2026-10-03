@@ -256,6 +256,9 @@ static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def)
      * dump. Gate the block to functions; other labels keep the lean base. */
     const bool is_fn =
         def->label && (strcmp(def->label, "Function") == 0 || strcmp(def->label, "Method") == 0);
+    const char *test_role = def->test_role == CBM_TEST_ROLE_CASE ? ",\"test_role\":\"case\""
+                            : def->test_role == CBM_TEST_ROLE_SUITE ? ",\"test_role\":\"suite\""
+                                                                   : "";
     int n;
     if (is_fn) {
         n = snprintf(buf, bufsize,
@@ -263,20 +266,20 @@ static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def)
                      "\"self_recursive\":%s,\"param_count\":%d,\"max_access_depth\":%d,"
                      "\"linear_scan_in_loop\":%d,\"alloc_in_loop\":%d,\"recursion_in_loop\":%s,"
                      "\"unguarded_recursion\":%s,"
-                     "\"lines\":%d,\"is_exported\":%s,\"is_test\":%s,\"is_entry_point\":%s",
+                     "\"lines\":%d,\"is_exported\":%s,\"is_test\":%s,\"is_entry_point\":%s%s",
                      def->complexity, def->cognitive, def->loop_count, def->loop_depth,
                      def->is_recursive ? "true" : "false", def->param_count, def->max_access_depth,
                      def->linear_scan_in_loop, def->alloc_in_loop,
                      def->recursion_in_loop ? "true" : "false",
                      def->unguarded_recursion ? "true" : "false", def->lines,
                      def->is_exported ? "true" : "false", def->is_test ? "true" : "false",
-                     def->is_entry_point ? "true" : "false");
+                     def->is_entry_point ? "true" : "false", test_role);
     } else {
         n = snprintf(buf, bufsize,
                      "{\"complexity\":%d,\"lines\":%d,\"is_exported\":%s,\"is_test\":%s,"
-                     "\"is_entry_point\":%s",
+                     "\"is_entry_point\":%s%s",
                      def->complexity, def->lines, def->is_exported ? "true" : "false",
-                     def->is_test ? "true" : "false", def->is_entry_point ? "true" : "false");
+                     def->is_test ? "true" : "false", def->is_entry_point ? "true" : "false", test_role);
     }
 
     if (n <= 0 || (size_t)n >= bufsize) {
@@ -797,6 +800,9 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
                                                                  : "quarantined after crash";
             cbm_pipeline_add_file_error(ctx->pipeline, rel, reason, phase);
             errors++;
+            if (!cbm_pipeline_test_extraction_ok(ctx, lang, NULL)) {
+                goto configured_failure;
+            }
             continue;
         }
 
@@ -822,25 +828,42 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
             } else if (rst == CBM_READ_OPEN_FAIL || rst == CBM_READ_OOM) {
                 cbm_pipeline_add_file_error(ctx->pipeline, rel, "read failed", "read");
             }
-            /* CBM_READ_EMPTY: benign 0-byte file — nothing to index, not reported. */
+            /* Proven empty files contain no invocation; other missing source
+             * cannot certify an active configured-definition mapping. */
+            if (rst != CBM_READ_EMPTY && !cbm_pipeline_test_extraction_ok(ctx, lang, NULL)) {
+                goto configured_failure;
+            }
             continue;
         }
 
         /* Studio Export XML is transformed to one cacheable aggregate so later
          * passes see the same calls/usages/semantic carriers as native UDL. */
         CBMFileResult *result =
+            cbm_pipeline_test_force_extract_null(ctx, lang) ? NULL :
             lang == CBM_LANG_OBJECTSCRIPT_EXPORT
                 ? cbm_pipeline_extract_objectscript_export(source, source_len, ctx->project_name,
                                                            rel, ctx->macro_table, NULL)
-                : cbm_extract_file_ex(
+                : cbm_extract_file_ex_with_tests(
                       source, source_len, lang, ctx->project_name, rel, CBM_EXTRACT_BUDGET, NULL,
-                      NULL /* no extra defines or include paths */, ctx->macro_table, NULL);
+                      NULL /* no extra defines or include paths */, ctx->macro_table, NULL,
+                      ctx->test_declarations);
         free(source);
 
+        if (!cbm_pipeline_test_extraction_ok(ctx, lang, result)) {
+            cbm_free_result(result);
+            goto configured_failure;
+        }
         if (!result) {
             errors++;
             cbm_pipeline_add_file_error(ctx->pipeline, rel, "extract failed", "extract");
             continue;
+        }
+        if (result->has_test_definition_owners && result->lsp_skipped) {
+            cbm_pipeline_test_owner_error(result);
+        }
+        if (!cbm_pipeline_test_result_ok(ctx, result)) {
+            cbm_free_result(result);
+            goto configured_failure;
         }
         /* Consume the previously-ignored has_error flag: a parse timeout /
          * parse failure / unsupported-grammar result carries no defs but must
@@ -928,4 +951,13 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
                  itoa_log(total_calls), "imports", itoa_log(total_imports), "errors",
                  itoa_log(errors));
     return 0;
+
+configured_failure:
+    if (owns_local_cache) {
+        for (int j = 0; j < file_count; j++) {
+            cbm_free_result(local_cache[j]);
+        }
+        free(local_cache);
+    }
+    return CBM_PIPELINE_ABORT_PRESERVE_DB;
 }

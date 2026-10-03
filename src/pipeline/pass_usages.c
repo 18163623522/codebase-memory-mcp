@@ -56,6 +56,7 @@ static bool pu_module_is_dir(CBMLanguage lang) {
 
 /* Read file into heap buffer. Caller must free(). */
 static char *read_file(const char *path, int *out_len) {
+    *out_len = -1; /* unknown/read failure; zero is a proven empty file */
     FILE *f = cbm_fopen(path, "rb");
     if (!f) {
         return NULL;
@@ -64,6 +65,9 @@ static char *read_file(const char *path, int *out_len) {
     long size = ftell(f);
     (void)fseek(f, 0, SEEK_SET);
     if (size <= 0 || size > cbm_max_file_bytes()) { /* generous, env-configurable cap (B4) */
+        if (size == 0) {
+            *out_len = 0;
+        }
         (void)fclose(f);
         return NULL;
     }
@@ -426,17 +430,34 @@ int cbm_pipeline_pass_usages(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *fil
             int source_len = 0;
             char *source = read_file(path, &source_len);
             if (!source) {
+                if (source_len != 0 &&
+                    !cbm_pipeline_test_extraction_ok(ctx, files[i].language, NULL)) {
+                    return CBM_PIPELINE_ABORT_PRESERVE_DB;
+                }
                 errors++;
                 continue;
             }
-            result = cbm_extract_file(source, source_len, files[i].language, ctx->project_name, rel,
-                                      CBM_EXTRACT_BUDGET, NULL, NULL);
+            result = cbm_pipeline_test_force_extract_null(ctx, files[i].language) ? NULL :
+                cbm_extract_file_ex_with_tests(
+                source, source_len, files[i].language, ctx->project_name, rel,
+                CBM_EXTRACT_BUDGET, NULL, NULL, NULL, NULL, ctx->test_declarations);
             free(source);
+            if (!cbm_pipeline_test_extraction_ok(ctx, files[i].language, result)) {
+                cbm_free_result(result);
+                return CBM_PIPELINE_ABORT_PRESERVE_DB;
+            }
             if (!result) {
                 errors++;
                 continue;
             }
             result_owned = true;
+        }
+
+        if (!cbm_pipeline_test_result_ok(ctx, result)) {
+            if (result_owned) {
+                cbm_free_result(result);
+            }
+            return CBM_PIPELINE_ABORT_PRESERVE_DB;
         }
 
         if (result->usages.count == 0 && result->throws.count == 0 && result->rw.count == 0) {

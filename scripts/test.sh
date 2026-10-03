@@ -349,6 +349,9 @@ bash "$ROOT/tests/test_version_metadata_contract.sh"
 echo "=== Step 0y: VM leg verdict contract ==="
 bash "$ROOT/tests/test_vm_verdict_contract.sh"
 
+echo "=== Step 0y2: isolated Windows venue contract ==="
+bash "$ROOT/tests/test_vm_isolation_contract.sh"
+
 # Step 0z: PR CI runs only the lanes scripts/ci/select-lanes.sh selects, so a
 # wrong selection is a silent gate loss. The decision table, and the replay of
 # every September 2026 PR push and real failure against it.
@@ -362,6 +365,11 @@ echo "=== Step 0z4: lane wiring (PRs select, dry run and release run all) ==="
 bash "$ROOT/tests/test_lane_wiring_contract.sh"
 echo "=== Step 0z5: test-impact shadow prediction contract ==="
 bash "$ROOT/tests/test_test_impact_predict.sh"
+# Step 0z6: the per-test coverage map must never report a test as executing
+# less than it did: every case where the builder cannot know (a killed forked
+# child, an unreadable profile, a failed suite) has to come out `incomplete`.
+echo "=== Step 0z6: per-test coverage map builder contract ==="
+bash "$ROOT/tests/test_coverage_map.sh"
 
 if [ "$CONTRACTS_ONLY" -eq 1 ]; then
     echo "=== test.sh: contracts-only — every contract step passed ==="

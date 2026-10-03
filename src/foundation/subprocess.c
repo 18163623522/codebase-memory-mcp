@@ -5,6 +5,7 @@
  */
 #include "subprocess.h"
 
+#include "arena.h"
 #include "compat.h" /* cbm_nanosleep */
 #include "compat_fs.h"
 #include "git_env.h" /* strip_git_repo_env: scrubbed child environment for git */
@@ -408,6 +409,9 @@ struct cbm_subprocess {
     size_t argc;
     char *windows_cmd_payload;
     char *log_file;
+    CBMArena stdout_arena;
+    char *stdout_file;
+    char *stdin_file;
     cbm_proc_log_cb on_log_line;
     void *log_ud;
     int quiet_timeout_ms;
@@ -468,6 +472,7 @@ static void cbm_subprocess_free_config(cbm_subprocess_t *process) {
     free(process->bin);
     free(process->windows_cmd_payload);
     free(process->log_file);
+    cbm_arena_destroy(&process->stdout_arena);
 #ifndef _WIN32
     cbm_git_child_env_free(process->envp);
 #endif
@@ -476,6 +481,16 @@ static void cbm_subprocess_free_config(cbm_subprocess_t *process) {
 
 static cbm_subprocess_t *cbm_subprocess_copy_opts(const cbm_proc_opts_t *opts) {
     if (!opts || !opts->bin || !opts->bin[0]) {
+        return NULL;
+    }
+    if (opts->stdout_file && (!opts->stdout_file[0] ||
+                              (opts->log_file && strcmp(opts->stdout_file, opts->log_file) == 0))) {
+        return NULL;
+    }
+    if (opts->stdin_file &&
+        (!opts->stdin_file[0] ||
+         (opts->log_file && strcmp(opts->stdin_file, opts->log_file) == 0) ||
+         (opts->stdout_file && strcmp(opts->stdin_file, opts->stdout_file) == 0))) {
         return NULL;
     }
 #ifdef _WIN32
@@ -504,6 +519,7 @@ static cbm_subprocess_t *cbm_subprocess_copy_opts(const cbm_proc_opts_t *opts) {
     if (!process) {
         return NULL;
     }
+    cbm_arena_init_lazy(&process->stdout_arena, 256);
     process->bin = cbm_strdup(opts->bin);
     process->windows_cmd_payload =
         opts->windows_cmd_payload ? cbm_strdup(opts->windows_cmd_payload) : NULL;
@@ -525,6 +541,20 @@ static cbm_subprocess_t *cbm_subprocess_copy_opts(const cbm_proc_opts_t *opts) {
     if (opts->log_file) {
         process->log_file = cbm_strdup(opts->log_file);
         if (!process->log_file) {
+            cbm_subprocess_free_config(process);
+            return NULL;
+        }
+    }
+    if (opts->stdout_file) {
+        process->stdout_file = cbm_arena_strdup(&process->stdout_arena, opts->stdout_file);
+        if (!process->stdout_file) {
+            cbm_subprocess_free_config(process);
+            return NULL;
+        }
+    }
+    if (opts->stdin_file) {
+        process->stdin_file = cbm_arena_strdup(&process->stdout_arena, opts->stdin_file);
+        if (!process->stdin_file) {
             cbm_subprocess_free_config(process);
             return NULL;
         }
@@ -646,16 +676,78 @@ static cbm_proc_poll_t cbm_subprocess_finish_failed(cbm_subprocess_t *process,
 
 #ifdef _WIN32
 
-static void cbm_win_close_spawn_handles(HANDLE nul, HANDLE log, LPPROC_THREAD_ATTRIBUTE_LIST attrs,
-                                        bool attrs_init) {
+/* Match cbm_path_to_wide's file-path spelling using the process arena. Existing
+ * option conversions retain their legacy heap ownership. */
+static wchar_t *cbm_win_stdin_path(cbm_subprocess_t *process) {
+    int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, process->stdin_file, -1, NULL, 0);
+    if (length <= 0 || length > 32767) {
+        return NULL;
+    }
+    wchar_t *wide = cbm_arena_alloc(&process->stdout_arena, (size_t)length * sizeof(*wide));
+    if (!wide || MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, process->stdin_file, -1, wide,
+                                     length) != length) {
+        return NULL;
+    }
+    size_t input_length = (size_t)length - 1U;
+    if (cbm_win_path_has_namespace_prefix(wide, input_length)) {
+        cbm_win_path_normalize_wide_separators(wide);
+        return wide;
+    }
+    if (input_length < 240U) {
+        return wide;
+    }
+    DWORD needed = GetFullPathNameW(wide, 0, NULL, NULL);
+    if (needed == 0U || needed > 32767U) {
+        return NULL;
+    }
+    wchar_t *full = cbm_arena_alloc(&process->stdout_arena, (size_t)needed * sizeof(*full));
+    DWORD copied = full ? GetFullPathNameW(wide, needed, full, NULL) : 0U;
+    if (copied == 0U || copied >= needed) {
+        return NULL;
+    }
+    cbm_win_path_normalize_wide_separators(full);
+    bool drive_absolute =
+        copied >= 3U &&
+        ((full[0] >= L'A' && full[0] <= L'Z') || (full[0] >= L'a' && full[0] <= L'z')) &&
+        full[1] == L':' && full[2] == L'\\';
+    bool unc_absolute = copied >= 5U && full[0] == L'\\' && full[1] == L'\\';
+    if (!drive_absolute && !unc_absolute) {
+        return NULL;
+    }
+    const wchar_t *prefix = drive_absolute ? L"\\\\?\\" : L"\\\\?\\UNC\\";
+    size_t prefix_length = drive_absolute ? 4U : 8U;
+    size_t tail_offset = drive_absolute ? 0U : 2U;
+    size_t tail_length = (size_t)copied - tail_offset;
+    size_t extended_length = prefix_length + tail_length;
+    if (extended_length >= 32767U) {
+        return NULL;
+    }
+    wchar_t *prefixed =
+        cbm_arena_alloc(&process->stdout_arena, (extended_length + 1U) * sizeof(*prefixed));
+    if (!prefixed) {
+        return NULL;
+    }
+    wmemcpy(prefixed, prefix, prefix_length);
+    wmemcpy(prefixed + prefix_length, full + tail_offset, tail_length + 1U);
+    return prefixed;
+}
+
+static void cbm_win_close_spawn_handles(HANDLE nul, HANDLE input, HANDLE log, HANDLE stdout_capture,
+                                        LPPROC_THREAD_ATTRIBUTE_LIST attrs, bool attrs_init) {
     if (attrs) {
         if (attrs_init) {
             DeleteProcThreadAttributeList(attrs);
         }
         free(attrs);
     }
+    if (stdout_capture != INVALID_HANDLE_VALUE) {
+        CloseHandle(stdout_capture);
+    }
     if (log != INVALID_HANDLE_VALUE) {
         CloseHandle(log);
+    }
+    if (input != INVALID_HANDLE_VALUE) {
+        CloseHandle(input);
     }
     if (nul != INVALID_HANDLE_VALUE) {
         CloseHandle(nul);
@@ -704,12 +796,37 @@ static int cbm_subprocess_spawn_win(cbm_subprocess_t *process) {
     security.bInheritHandle = TRUE;
     HANDLE nul = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE,
                              FILE_SHARE_READ | FILE_SHARE_WRITE, &security, OPEN_EXISTING, 0, NULL);
+    HANDLE input = INVALID_HANDLE_VALUE;
     HANDLE log = INVALID_HANDLE_VALUE;
+    HANDLE stdout_capture = INVALID_HANDLE_VALUE;
     if (nul == INVALID_HANDLE_VALUE) {
         CloseHandle(job);
         free(wbin);
         free(wcmdline);
         return -1;
+    }
+    if (process->stdin_file) {
+        wchar_t *winput = cbm_win_stdin_path(process);
+        /* Validate before any output can be truncated; recheck the opened
+         * handle rather than relying only on path attributes. */
+        DWORD attributes = winput ? GetFileAttributesW(winput) : INVALID_FILE_ATTRIBUTES;
+        if (attributes != INVALID_FILE_ATTRIBUTES &&
+            !(attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT |
+                            FILE_ATTRIBUTE_DEVICE))) {
+            input = CreateFileW(winput, GENERIC_READ, FILE_SHARE_READ, &security, OPEN_EXISTING,
+                                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+        }
+        BY_HANDLE_FILE_INFORMATION input_info;
+        if (input == INVALID_HANDLE_VALUE || GetFileType(input) != FILE_TYPE_DISK ||
+            !GetFileInformationByHandle(input, &input_info) ||
+            (input_info.dwFileAttributes &
+             (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DEVICE))) {
+            cbm_win_close_spawn_handles(nul, input, log, stdout_capture, NULL, false);
+            CloseHandle(job);
+            free(wbin);
+            free(wcmdline);
+            return -1;
+        }
     }
     if (process->log_file) {
         wchar_t *wlog = cbm_path_to_wide(process->log_file);
@@ -724,7 +841,7 @@ static int cbm_subprocess_spawn_win(cbm_subprocess_t *process) {
             free(wlog);
         }
         if (log == INVALID_HANDLE_VALUE) {
-            CloseHandle(nul);
+            cbm_win_close_spawn_handles(nul, input, log, stdout_capture, NULL, false);
             CloseHandle(job);
             free(wbin);
             free(wcmdline);
@@ -732,11 +849,33 @@ static int cbm_subprocess_spawn_win(cbm_subprocess_t *process) {
         }
     }
 
-    HANDLE inherit[2];
+    if (process->stdout_file) {
+        wchar_t *wstdout = cbm_path_to_wide(process->stdout_file);
+        if (wstdout) {
+            stdout_capture = CreateFileW(wstdout, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                         &security, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+            free(wstdout);
+        }
+        if (stdout_capture == INVALID_HANDLE_VALUE) {
+            cbm_win_close_spawn_handles(nul, input, log, stdout_capture, NULL, false);
+            CloseHandle(job);
+            free(wbin);
+            free(wcmdline);
+            return -1;
+        }
+    }
+
+    HANDLE inherit[4];
     SIZE_T inherit_count = 0;
     inherit[inherit_count++] = nul;
+    if (input != INVALID_HANDLE_VALUE) {
+        inherit[inherit_count++] = input;
+    }
     if (log != INVALID_HANDLE_VALUE) {
         inherit[inherit_count++] = log;
+    }
+    if (stdout_capture != INVALID_HANDLE_VALUE) {
+        inherit[inherit_count++] = stdout_capture;
     }
     SIZE_T attrs_size = 0;
     (void)InitializeProcThreadAttributeList(NULL, 1, 0, &attrs_size);
@@ -746,7 +885,7 @@ static int cbm_subprocess_spawn_win(cbm_subprocess_t *process) {
                                          attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit,
                                          inherit_count * sizeof(inherit[0]), NULL, NULL);
     if (!attrs_ready) {
-        cbm_win_close_spawn_handles(nul, log, attrs, attrs_init);
+        cbm_win_close_spawn_handles(nul, input, log, stdout_capture, attrs, attrs_init);
         CloseHandle(job);
         free(wbin);
         free(wcmdline);
@@ -757,8 +896,10 @@ static int cbm_subprocess_spawn_win(cbm_subprocess_t *process) {
     ZeroMemory(&startup, sizeof(startup));
     startup.StartupInfo.cb = sizeof(startup);
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-    startup.StartupInfo.hStdInput = nul;
-    startup.StartupInfo.hStdOutput = log != INVALID_HANDLE_VALUE ? log : nul;
+    startup.StartupInfo.hStdInput = input != INVALID_HANDLE_VALUE ? input : nul;
+    startup.StartupInfo.hStdOutput = stdout_capture != INVALID_HANDLE_VALUE
+                                         ? stdout_capture
+                                         : (log != INVALID_HANDLE_VALUE ? log : nul);
     startup.StartupInfo.hStdError = log != INVALID_HANDLE_VALUE ? log : nul;
     startup.lpAttributeList = attrs;
 
@@ -775,7 +916,7 @@ static int cbm_subprocess_spawn_win(cbm_subprocess_t *process) {
                    CreateProcessW(wbin, wcmdline, NULL, NULL, TRUE, flags, (LPVOID)env, NULL,
                                   &startup.StartupInfo, &child);
     cbm_git_child_env_free(env); /* CreateProcessW copied the block into the child */
-    cbm_win_close_spawn_handles(nul, log, attrs, attrs_init);
+    cbm_win_close_spawn_handles(nul, input, log, stdout_capture, attrs, attrs_init);
     free(wbin);
     free(wcmdline);
     if (!created) {
@@ -1072,7 +1213,8 @@ static void cbm_posix_reset_child_signals(void) {
 /* fork+exec child setup. On Apple this runs ONLY for the exec-failure
  * fallback (see cbm_posix_spawn_apple), which preserves the documented
  * "bogus binary => child exits 127" contract across platforms. */
-static void cbm_posix_child_exec(cbm_subprocess_t *process, int input, int output, long max_fd) {
+static void cbm_posix_child_exec(cbm_subprocess_t *process, int input, int output, int error,
+                                 long max_fd) {
     if (setpgid(0, 0) < 0) {
         _exit(127);
     }
@@ -1080,8 +1222,8 @@ static void cbm_posix_child_exec(cbm_subprocess_t *process, int input, int outpu
 
     /* Never let a worker consume the MCP transport inherited as stdin. Only
      * async-signal-safe calls are used between fork and exec. */
-    if (input < 0 || output < 0 || dup2(input, STDIN_FILENO) < 0 ||
-        dup2(output, STDOUT_FILENO) < 0 || dup2(output, STDERR_FILENO) < 0) {
+    if (input < 0 || output < 0 || error < 0 || dup2(input, STDIN_FILENO) < 0 ||
+        dup2(output, STDOUT_FILENO) < 0 || dup2(error, STDERR_FILENO) < 0) {
         _exit(127);
     }
     if (input > STDERR_FILENO) {
@@ -1089,6 +1231,9 @@ static void cbm_posix_child_exec(cbm_subprocess_t *process, int input, int outpu
     }
     if (output > STDERR_FILENO) {
         (void)close(output);
+    }
+    if (error > STDERR_FILENO && error != output) {
+        (void)close(error);
     }
     for (int fd = STDERR_FILENO + 1; fd < max_fd; fd++) {
         (void)close(fd);
@@ -1141,7 +1286,8 @@ static int cbm_posix_fd_at_least_three(int fd) {
  *     the child's close-everything loop, and the three dup2'd fds stay open
  *     because dup2 clears close-on-exec.
  * posix_spawnp keeps execvp's PATH semantics for a bare tool name. */
-static int cbm_posix_spawn_apple(cbm_subprocess_t *process, int input, int output, pid_t *pid_out) {
+static int cbm_posix_spawn_apple(cbm_subprocess_t *process, int input, int output, int error,
+                                 pid_t *pid_out) {
     /* posix_spawn is the PRIMARY path on macOS; fork+exec is only the
      * exec-class fallback. Injection therefore has to live here too, or a test
      * on macOS exercises nothing. */
@@ -1171,7 +1317,7 @@ static int cbm_posix_spawn_apple(cbm_subprocess_t *process, int input, int outpu
                       posix_spawnattr_setsigdefault(&attr, &all_signals) == 0 &&
                       posix_spawn_file_actions_adddup2(&actions, input, STDIN_FILENO) == 0 &&
                       posix_spawn_file_actions_adddup2(&actions, output, STDOUT_FILENO) == 0 &&
-                      posix_spawn_file_actions_adddup2(&actions, output, STDERR_FILENO) == 0;
+                      posix_spawn_file_actions_adddup2(&actions, error, STDERR_FILENO) == 0;
     pid_t pid = -1;
     int rc = configured ? posix_spawnp(&pid, process->bin, &actions, &attr, process->argv,
                                        process->envp ? process->envp : environ)
@@ -1209,7 +1355,26 @@ static int cbm_subprocess_spawn_posix(cbm_subprocess_t *process) {
 #ifdef O_CLOEXEC
     input_flags |= O_CLOEXEC;
 #endif
-    int input = cbm_posix_fd_at_least_three(open("/dev/null", input_flags));
+    if (process->stdin_file) {
+        /* O_NONBLOCK prevents waiting for a FIFO writer before fstat rejects
+         * non-regular input. No output has been opened at this point. */
+        input_flags |= O_NONBLOCK;
+#ifdef O_NOFOLLOW
+        input_flags |= O_NOFOLLOW;
+#endif
+    }
+    int input = cbm_posix_fd_at_least_three(
+        open(process->stdin_file ? process->stdin_file : "/dev/null", input_flags));
+    if (input < 0) {
+        return -1;
+    }
+    if (process->stdin_file) {
+        struct stat input_status;
+        if (fstat(input, &input_status) != 0 || !S_ISREG(input_status.st_mode)) {
+            (void)close(input);
+            return -1;
+        }
+    }
     const char *target = process->log_file ? process->log_file : "/dev/null";
     int output_flags = O_WRONLY | O_CREAT | O_TRUNC;
 #ifdef O_CLOEXEC
@@ -1219,13 +1384,8 @@ static int cbm_subprocess_spawn_posix(cbm_subprocess_t *process) {
     output_flags |= O_NOFOLLOW;
 #endif
     int output = cbm_posix_fd_at_least_three(open(target, output_flags, 0600));
-    if (input < 0 || output < 0) {
-        if (input >= 0) {
-            (void)close(input);
-        }
-        if (output >= 0) {
-            (void)close(output);
-        }
+    if (output < 0) {
+        (void)close(input);
         return -1;
     }
     struct stat output_status;
@@ -1241,6 +1401,23 @@ static int cbm_subprocess_spawn_posix(cbm_subprocess_t *process) {
         return -1;
     }
 
+    int stdout_capture = -1;
+    if (process->stdout_file) {
+        stdout_capture =
+            cbm_posix_fd_at_least_three(open(process->stdout_file, output_flags, 0600));
+        struct stat stdout_status;
+        if (stdout_capture < 0 || fstat(stdout_capture, &stdout_status) != 0 ||
+            !S_ISREG(stdout_status.st_mode) || fchmod(stdout_capture, 0600) != 0) {
+            if (stdout_capture >= 0) {
+                (void)close(stdout_capture);
+            }
+            (void)close(input);
+            (void)close(output);
+            return -1;
+        }
+    }
+    int child_output = stdout_capture >= 0 ? stdout_capture : output;
+
     long max_fd = sysconf(_SC_OPEN_MAX);
     if (max_fd < 0 || max_fd > 1048576L) {
         max_fd = 65536L;
@@ -1248,11 +1425,11 @@ static int cbm_subprocess_spawn_posix(cbm_subprocess_t *process) {
 
     pid_t pid = -1;
 #ifdef __APPLE__
-    int spawn_rc = cbm_posix_spawn_apple(process, input, output, &pid);
+    int spawn_rc = cbm_posix_spawn_apple(process, input, child_output, output, &pid);
     for (int attempt = 0; spawn_rc == CBM_SPAWN_RETRY && attempt < CBM_SPAWN_RETRY_ATTEMPTS;
          attempt++) {
         cbm_spawn_backoff(attempt);
-        spawn_rc = cbm_posix_spawn_apple(process, input, output, &pid);
+        spawn_rc = cbm_posix_spawn_apple(process, input, child_output, output, &pid);
     }
     if (spawn_rc == CBM_SPAWN_RETRY) {
         spawn_rc = -1; /* still exhausted after backoff: a real failure */
@@ -1260,6 +1437,9 @@ static int cbm_subprocess_spawn_posix(cbm_subprocess_t *process) {
     if (spawn_rc < 0) {
         (void)close(input);
         (void)close(output);
+        if (stdout_capture >= 0) {
+            (void)close(stdout_capture);
+        }
         return -1;
     }
     if (spawn_rc > 0) { /* exec-class failure: reproduce the fork+exec 127 */
@@ -1267,10 +1447,13 @@ static int cbm_subprocess_spawn_posix(cbm_subprocess_t *process) {
         if (pid < 0) {
             (void)close(input);
             (void)close(output);
+            if (stdout_capture >= 0) {
+                (void)close(stdout_capture);
+            }
             return -1;
         }
         if (pid == 0) {
-            cbm_posix_child_exec(process, input, output, max_fd);
+            cbm_posix_child_exec(process, input, child_output, output, max_fd);
         }
     }
 #else
@@ -1278,14 +1461,20 @@ static int cbm_subprocess_spawn_posix(cbm_subprocess_t *process) {
     if (pid < 0) {
         (void)close(input);
         (void)close(output);
+        if (stdout_capture >= 0) {
+            (void)close(stdout_capture);
+        }
         return -1;
     }
     if (pid == 0) {
-        cbm_posix_child_exec(process, input, output, max_fd);
+        cbm_posix_child_exec(process, input, child_output, output, max_fd);
     }
 #endif
     (void)close(input);
     (void)close(output);
+    if (stdout_capture >= 0) {
+        (void)close(stdout_capture);
+    }
 
     /* Parent and child both establish the group, removing scheduler-order races.
      * If the child won and already execed, EACCES is accepted only after proving

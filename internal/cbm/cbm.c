@@ -2147,7 +2147,8 @@ static CBMFileResult *extract_file_ex_body(const char *source, int source_len, C
                                            const char **include_paths,
                                            const CBMMacroTable *macro_table,
                                            const CBMReturnTypeTable *return_type_table,
-                                           CBMArena *scratch) {
+                                           CBMArena *scratch,
+                                           const cbm_test_declarations_t *test_declarations) {
     // Allocate result on heap (arena inside for all string data)
     CBMFileResult *result = cbm_result_alloc();
     if (!result) {
@@ -2156,6 +2157,9 @@ static CBMFileResult *extract_file_ex_body(const char *source, int source_len, C
 
     cbm_work_arena_take(&result->arena);
     CBMArena *a = &result->arena;
+    if (!cbm_test_declarations_validate(result, test_declarations)) {
+        return result;
+    }
 
     /* Crash-quarantine hard guard (Stage 3c): a file the supervisor pinned as a
      * crasher must NEVER be parsed again. Return a clean empty result BEFORE the
@@ -2334,11 +2338,14 @@ static CBMFileResult *extract_file_ex_body(const char *source, int source_len, C
         .macro_table = macro_table,
         .return_type_table = return_type_table,
         .walk_budget_nodes = cbm_walk_max_nodes(),
+        .test_declarations = test_declarations,
+        .test_declarations_raw_source = true,
     };
 
     // Run extractors: defs + imports use separate walks (unique recursion patterns),
     // then a single unified cursor walk handles the remaining 7 extractors.
     cbm_extract_definitions(&ctx);
+    cbm_test_declarations_finish(&ctx);
     cbm_extract_imports(&ctx);
     cbm_extract_unified(&ctx);
     result->tree_nodes = ts_node_descendant_count(root);
@@ -2373,8 +2380,18 @@ static CBMFileResult *extract_file_ex_body(const char *source, int source_len, C
             cbm_run_go_lsp(a, result, source, source_len, root);
         }
         if (language == CBM_LANG_C || language == CBM_LANG_CPP || language == CBM_LANG_CUDA) {
-            cbm_run_c_lsp(a, result, source, source_len, root, language != CBM_LANG_C,
-                          CBM_SOURCE_ORIGIN_RAW);
+            if (!cbm_run_c_lsp_with_test_owners(
+                    a, result, source, source_len, root, language != CBM_LANG_C,
+                    CBM_SOURCE_ORIGIN_RAW, result)) {
+                result->has_error = true;
+                if (result->test_declarations_status == CBM_TEST_EXTRACT_OK) {
+                    result->test_declarations_status = CBM_TEST_EXTRACT_UNSUPPORTED_FORM;
+                    result->test_declaration_index = -1;
+                    result->test_declaration_line = 0;
+                    result->error_msg = cbm_arena_strdup(a, "configured owner source identity mismatch");
+                    if (!result->error_msg) result->test_declarations_status = CBM_TEST_EXTRACT_OOM;
+                }
+            }
         }
         if (language == CBM_LANG_PHP) {
             cbm_run_php_lsp(a, result, source, source_len, root);
@@ -2485,6 +2502,10 @@ static CBMFileResult *extract_file_ex_body(const char *source, int source_len, C
                         .rel_path = rel_path,
                         .module_qn = result->module_qn,
                         .root = pp_root,
+                        /* Preset switches still apply, but expanded bytes
+                         * cannot acquire a raw configured definition identity. */
+                        .test_declarations = test_declarations,
+                        .test_declarations_raw_source = false,
                     };
                     // Re-run unified extraction on expanded source.
                     // This adds macro-expanded calls; duplicates with original calls are
@@ -3046,6 +3067,17 @@ CBMFileResult *cbm_extract_file_ex(const char *source, int source_len, CBMLangua
                                    int64_t timeout_micros, const char **extra_defines,
                                    const char **include_paths, const CBMMacroTable *macro_table,
                                    const CBMReturnTypeTable *return_type_table) {
+    return cbm_extract_file_ex_with_tests(source, source_len, language, project, rel_path,
+                                          timeout_micros, extra_defines, include_paths,
+                                          macro_table, return_type_table, NULL);
+}
+
+CBMFileResult *cbm_extract_file_ex_with_tests(
+    const char *source, int source_len, CBMLanguage language, const char *project,
+    const char *rel_path, int64_t timeout_micros, const char **extra_defines,
+    const char **include_paths, const CBMMacroTable *macro_table,
+    const CBMReturnTypeTable *return_type_table,
+    const cbm_test_declarations_t *test_declarations) {
     CBMArena scratch;
     if (tl_scratch_live && tl_scratch_slot) {
         scratch = *tl_scratch_slot;
@@ -3056,7 +3088,8 @@ CBMFileResult *cbm_extract_file_ex(const char *source, int source_len, CBMLangua
     }
     CBMFileResult *result = extract_file_ex_body(source, source_len, language, project, rel_path,
                                                  timeout_micros, extra_defines, include_paths,
-                                                 macro_table, return_type_table, &scratch);
+                                                 macro_table, return_type_table, &scratch,
+                                                 test_declarations);
     /* !tl_scratch_live: a nested extraction (an embedded language inside this
      * file) may already have parked its own; never overwrite it. */
     /* Kept up to CBM_EXTRACT_SCRATCH_KEEP_BYTES, grown blocks included: the

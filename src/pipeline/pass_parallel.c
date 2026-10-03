@@ -485,6 +485,9 @@ static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def)
      * pass_definitions.c::build_def_props — keep both in sync. */
     const bool is_fn =
         def->label && (strcmp(def->label, "Function") == 0 || strcmp(def->label, "Method") == 0);
+    const char *test_role = def->test_role == CBM_TEST_ROLE_CASE ? ",\"test_role\":\"case\""
+                            : def->test_role == CBM_TEST_ROLE_SUITE ? ",\"test_role\":\"suite\""
+                                                                   : "";
     int n;
     if (is_fn) {
         n = snprintf(buf, bufsize,
@@ -492,20 +495,20 @@ static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def)
                      "\"self_recursive\":%s,\"param_count\":%d,\"max_access_depth\":%d,"
                      "\"linear_scan_in_loop\":%d,\"alloc_in_loop\":%d,\"recursion_in_loop\":%s,"
                      "\"unguarded_recursion\":%s,"
-                     "\"lines\":%d,\"is_exported\":%s,\"is_test\":%s,\"is_entry_point\":%s",
+                     "\"lines\":%d,\"is_exported\":%s,\"is_test\":%s,\"is_entry_point\":%s%s",
                      def->complexity, def->cognitive, def->loop_count, def->loop_depth,
                      def->is_recursive ? "true" : "false", def->param_count, def->max_access_depth,
                      def->linear_scan_in_loop, def->alloc_in_loop,
                      def->recursion_in_loop ? "true" : "false",
                      def->unguarded_recursion ? "true" : "false", def->lines,
                      def->is_exported ? "true" : "false", def->is_test ? "true" : "false",
-                     def->is_entry_point ? "true" : "false");
+                     def->is_entry_point ? "true" : "false", test_role);
     } else {
         n = snprintf(buf, bufsize,
                      "{\"complexity\":%d,\"lines\":%d,\"is_exported\":%s,\"is_test\":%s,"
-                     "\"is_entry_point\":%s",
+                     "\"is_entry_point\":%s%s",
                      def->complexity, def->lines, def->is_exported ? "true" : "false",
-                     def->is_test ? "true" : "false", def->is_entry_point ? "true" : "false");
+                     def->is_test ? "true" : "false", def->is_entry_point ? "true" : "false", test_role);
     }
     if (n <= 0 || (size_t)n >= bufsize) {
         buf[0] = '\0';
@@ -1190,6 +1193,7 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
                                                                  : "quarantined after crash";
             pp_err_add(errs, fi->rel_path, reason, phase);
             ws->errors++;
+            (void)cbm_pipeline_test_extraction_ok(ec->pctx, fi->language, NULL);
             continue;
         }
 
@@ -1218,7 +1222,9 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
             } else if (rst == CBM_READ_OPEN_FAIL || rst == CBM_READ_OOM) {
                 pp_err_add(errs, fi->rel_path, "read failed", "read");
             }
-            /* CBM_READ_EMPTY: benign 0-byte file — not reported. */
+            if (rst != CBM_READ_EMPTY) {
+                (void)cbm_pipeline_test_extraction_ok(ec->pctx, fi->language, NULL);
+            }
             continue;
         }
 
@@ -1243,21 +1249,42 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
          * generated classes are composed before entering the common registry
          * and resolution lifecycle. */
         CBMFileResult *result =
+            cbm_pipeline_test_force_extract_null(ec->pctx, fi->language) ? NULL :
             fi->language == CBM_LANG_OBJECTSCRIPT_EXPORT
                 ? cbm_pipeline_extract_objectscript_export(source, source_len, ec->project_name,
                                                            fi->rel_path, ec->macro_table,
                                                            ec->return_type_table)
-                : cbm_extract_file_ex(source, source_len, fi->language, ec->project_name,
-                                      fi->rel_path, CBM_EXTRACT_BUDGET, NULL, NULL, ec->macro_table,
-                                      ec->return_type_table);
+                : cbm_extract_file_ex_with_tests(
+                      source, source_len, fi->language, ec->project_name, fi->rel_path,
+                      CBM_EXTRACT_BUDGET, NULL, NULL, ec->macro_table,
+                      ec->return_type_table, ec->pctx->test_declarations);
 
         uint64_t file_elapsed_ms = (extract_now_ns() - file_t0) / PP_USEC_PER_MS;
 
+        if (!cbm_pipeline_test_extraction_ok(ec->pctx, fi->language, result)) {
+            cbm_free_result(result);
+            free_source(source);
+            cbm_destroy_thread_parser();
+            cbm_slab_reclaim();
+            cbm_mem_collect();
+            continue;
+        }
         if (!result) {
             log_extract_fail(sort_pos, file_elapsed_ms, fi->rel_path);
             free_source(source);
             ws->errors++;
             pp_err_add(errs, fi->rel_path, "extract failed", "extract");
+            continue;
+        }
+        if (result->has_test_definition_owners && result->lsp_skipped) {
+            cbm_pipeline_test_owner_error(result);
+        }
+        if (!cbm_pipeline_test_result_ok(ec->pctx, result)) {
+            cbm_free_result(result);
+            free_source(source);
+            cbm_destroy_thread_parser();
+            cbm_slab_reclaim();
+            cbm_mem_collect();
             continue;
         }
         log_extract_done(sort_pos, file_elapsed_ms, result->defs.count, fi->rel_path);
@@ -1639,6 +1666,10 @@ int cbm_parallel_extract_ex(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *file
     /* The over-budget verdict outranks the cancel sentinel: a caller must be
      * able to name the cause, and the orchestrator discards the staging DB on
      * every non-zero code alike (the live generation is never touched). */
+    if (atomic_load(&ctx->test_declarations_failed)) {
+        cbm_log_error("pipeline.err", "phase", "test_declarations_extract");
+        return CBM_PIPELINE_ABORT_PRESERVE_DB;
+    }
     if (atomic_load(&ec.over_budget_abort)) {
         return CBM_PIPELINE_ABORT_OVER_BUDGET;
     }
@@ -1813,9 +1844,20 @@ int cbm_build_registry_from_cache(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
         if (!result && ctx->spill && cbm_result_spill_has(ctx->spill, i)) {
             result = cbm_result_spill_load(ctx->spill, i);
             loaded = result != NULL;
+            if (!cbm_pipeline_test_extraction_ok(ctx, files[i].language, result)) {
+                cbm_pipeline_result_release(result, loaded);
+                cbm_pipeline_namespace_map_free(namespace_map);
+                return CBM_PIPELINE_ABORT_PRESERVE_DB;
+            }
         }
         if (!result) {
             continue;
+        }
+
+        if (!cbm_pipeline_test_result_ok(ctx, result)) {
+            cbm_pipeline_result_release(result, loaded);
+            cbm_pipeline_namespace_map_free(namespace_map);
+            return CBM_PIPELINE_ABORT_PRESERVE_DB;
         }
 
         const char *rel = files[i].rel_path;
@@ -3778,10 +3820,14 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
             cbm_result_spill_has(rc->pctx->spill, file_idx)) {
             result = cbm_result_spill_load(rc->pctx->spill, file_idx);
             ws->loaded = result;
+            (void)cbm_pipeline_test_extraction_ok(rc->pctx, rc->files[file_idx].language, result);
         }
         if (!result) {
             atomic_fetch_add_explicit(&rc->time_ns_total_loop, extract_now_ns() - _loop_t0,
                                       memory_order_relaxed);
+            continue;
+        }
+        if (!cbm_pipeline_test_result_ok(rc->pctx, result)) {
             continue;
         }
         atomic_fetch_add_explicit(&rc->total_files_visited, 1, memory_order_relaxed);
@@ -3807,6 +3853,14 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
                 (strstr(rel, ".pb-c.c") != NULL) || (strstr(rel, ".pb-c.h") != NULL);
         }
 
+        if (result->has_test_definition_owners &&
+            (!rc->all_defs || rc->def_count <= 0 || !cbm_pxc_has_cross_lsp(lang) ||
+             is_generated || result->lsp_skipped)) {
+            cbm_pipeline_test_owner_error(result);
+            (void)cbm_pipeline_test_result_ok(rc->pctx, result);
+            continue;
+        }
+
         /* Cross-file LSP is a per-file tree-sitter re-parse + AST walk +
          * registry lookups — ~50-150ms per file. It can only resolve semantic
          * sites present in that AST: invocations plus explicit callable
@@ -3830,7 +3884,7 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
                (jvm_cross_lsp || rust_workspace_cross_lsp || pending_lsp_site ||
                 qualified_lsp_sites < semantic_sites)) ||
               unowned_c_member) &&
-             !is_generated);
+             !is_generated) || result->has_test_definition_owners;
 
         /* Skip files with nothing else to resolve and no cross-LSP work. */
         if (result->calls.count == 0 && result->usages.count == 0 && result->throws.count == 0 &&
@@ -3938,6 +3992,9 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
                                  itoa_log((int)lsp_elapsed_ms), "path", rel);
                 }
                 atomic_fetch_add_explicit(&rc->lsp_cross_processed, SKIP_ONE, memory_order_relaxed);
+                if (!cbm_pipeline_test_result_ok(rc->pctx, result)) {
+                    goto resolve_file_cleanup;
+                }
             } else {
                 /* Source unavailable even after the re-read fallback (file
                  * deleted / unreadable / oversized) → the cross-file LSP
@@ -3947,6 +4004,12 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
                  * doing so would flood skipped[] with false positives (itself a
                  * false-guard bug). The "cross_lsp" phase string is reserved for
                  * Track C's real crash-attribution signal; leave it unwired. */
+                free_source(lsp_source_owned);
+                if (result->has_test_definition_owners) {
+                    cbm_pipeline_test_owner_error(result);
+                    (void)cbm_pipeline_test_result_ok(rc->pctx, result);
+                    goto resolve_file_cleanup;
+                }
                 atomic_fetch_add_explicit(&rc->lsp_cross_skipped_no_source, SKIP_ONE,
                                           memory_order_relaxed);
             }
@@ -3984,6 +4047,7 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
         atomic_fetch_add_explicit(&rc->time_ns_semantic, extract_now_ns() - _ph_t0,
                                   memory_order_relaxed);
 
+resolve_file_cleanup:
         cbm_registry_reach_cache_end();
         cbm_registry_import_map_cache_end();
         cbm_registry_resolve_cache_end();
@@ -4021,6 +4085,14 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
     CBMCrossLspRegistries *cross_registries = (CBMCrossLspRegistries *)cross_registries_v;
     if (file_count == 0) {
         return 0;
+    }
+
+    /* Preparation or an opt-out cannot erase owners already found by
+     * extraction, including results currently parked in the spill store. */
+    if (atomic_load(&ctx->test_declarations_failed) ||
+        (atomic_load(&ctx->test_definition_owners_seen) && (!all_defs || def_count <= 0))) {
+        atomic_store(&ctx->test_declarations_failed, 1);
+        return CBM_PIPELINE_ABORT_PRESERVE_DB;
     }
 
     cbm_log_info("parallel.resolve.start", "files", itoa_log(file_count), "workers",
@@ -4121,6 +4193,11 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
                    total_calls + total_usages);
 
     cbm_aligned_free(workers);
+
+    if (atomic_load(&ctx->test_declarations_failed)) {
+        cbm_log_error("pipeline.err", "phase", "test_declarations_resolve");
+        return CBM_PIPELINE_ABORT_PRESERVE_DB;
+    }
 
     /* Go-style implicit interface satisfaction (needs full graph, serial) */
     int go_impl = cbm_pipeline_implements_go(ctx);

@@ -32,6 +32,7 @@
 #include "foundation/constants.h"
 #include "foundation/hash_table.h"
 #include "foundation/log.h"
+#include "foundation/platform.h"
 #include "foundation/compat_fs.h"
 #include "foundation/compat.h" /* CBM_TLS */
 
@@ -558,17 +559,21 @@ static int pxc_build_rust_impl_relation(CBMArena *arena, const CBMImplTrait *imp
 
 /* Collect a project-wide CBMLSPDef[] from all cached results. Returns a
  * malloc'd array (caller frees) of length *out_count. String fields are
- * borrowed from cache[i]->arena and from def_modules[i] (also borrowed). */
+ * borrowed from cache[i]->arena and from def_modules[i] (also borrowed).
+ * Required configured-owner spill load failure: NULL, *out_count = -1, and
+ * cleared out_def_starts. No partial aggregate is usable in that case. */
 CBMLSPDef *cbm_pxc_collect_all_defs(const cbm_pipeline_ctx_t *ctx, CBMArena *arena,
                                     CBMFileResult **cache, const cbm_file_info_t *files,
                                     int file_count, const char *project_name, char **def_modules,
                                     int *out_count, int *out_def_starts) {
     const cbm_result_spill_t *spill = ctx ? ctx->spill : NULL;
+    bool owner_walk_required = ctx && atomic_load(&ctx->test_definition_owners_seen);
     int total = 0;
     for (int i = 0; i < file_count; i++) {
         int defs = 0;
         int impls = 0;
         if (cache[i]) {
+            owner_walk_required = owner_walk_required || cache[i]->has_test_definition_owners;
             defs = cache[i]->defs.count;
             impls = cache[i]->impl_traits.count;
         } else if (spill && cbm_result_spill_has(spill, i)) {
@@ -603,8 +608,25 @@ CBMLSPDef *cbm_pxc_collect_all_defs(const cbm_pipeline_ctx_t *ctx, CBMArena *are
         CBMFileResult *fr = cache[fi];
         bool fr_loaded = false;
         if (!fr && spill && cbm_result_spill_has(spill, fi)) {
+            /* The test bit applies only here: registry and subsequent direct
+             * loads remain real. Returning immediately forces exactly the
+             * first actual collector spilled-load boundary, without timing. */
+#if defined(CBM_ENABLE_TEST_SEAMS) && CBM_ENABLE_TEST_SEAMS
+            bool force_null = owner_walk_required && ctx &&
+                (ctx->test_fault_mask & CBM_PIPELINE_TEST_FAULT_COLLECT_SPILL_NULL);
+            fr = force_null ? NULL : cbm_result_spill_load(spill, fi);
+#else
             fr = cbm_result_spill_load(spill, fi);
+#endif
             fr_loaded = fr != NULL;
+            if (!fr && owner_walk_required) {
+                free(defs);
+                *out_count = -1;
+                if (out_def_starts) {
+                    memset(out_def_starts, 0, (size_t)(file_count + 1) * sizeof(int));
+                }
+                return NULL;
+            }
         }
         if (!fr)
             continue;
@@ -1309,8 +1331,18 @@ void cbm_pxc_run_one(CBMLanguage lang, CBMFileResult *r, const char *source, int
          * imports — the existing pipeline doesn't carry C-style include
          * resolution as a separate map, so pass NULL/0 and let the LSP
          * fall back to its own #include scan. */
-        cbm_run_c_lsp_cross(&scratch, source, source_len, module_qn, cpp_mode, defs, def_count,
-                            NULL, NULL, 0, tree, &out);
+        if (r->has_test_definition_owners) {
+            if (!cbm_run_c_lsp_cross_with_test_owners(
+                    &scratch, source, source_len, module_qn, cpp_mode, defs, def_count,
+                    NULL, NULL, 0, tree, &out, CBM_SOURCE_ORIGIN_RAW, r)) {
+                cbm_pipeline_test_owner_error(r);
+                pxc_scratch_give(PXC_SCRATCH_DISPATCH, &scratch);
+                return; /* out may be partial: never append it */
+            }
+        } else {
+            cbm_run_c_lsp_cross(&scratch, source, source_len, module_qn, cpp_mode, defs, def_count,
+                                NULL, NULL, 0, tree, &out);
+        }
         break;
     }
     case CBM_LANG_PYTHON:
@@ -1427,6 +1459,9 @@ void cbm_pxc_dispatch_file(CBMLanguage lang, CBMFileResult *result, const char *
                            int imp_count, CBMTypeRegistry *(*rust_shared_get)(void *),
                            void *rust_shared_ctx) {
     if (result && result->lsp_skipped) {
+        if (result->has_test_definition_owners) {
+            cbm_pipeline_test_owner_error(result);
+        }
         return;
     }
     if (!result) {
@@ -1473,9 +1508,20 @@ void cbm_pxc_dispatch_file(CBMLanguage lang, CBMFileResult *result, const char *
         case CBM_LANG_C:
         case CBM_LANG_CPP:
         case CBM_LANG_CUDA:
-            cbm_run_c_lsp_cross_with_registry(&scratch, source, source_len, def_module,
-                                              (lang != CBM_LANG_C), &overlay, imp_keys, imp_vals,
-                                              imp_count, result->cached_tree, &out);
+            if (result->has_test_definition_owners) {
+                if (!cbm_run_c_lsp_cross_with_registry_with_test_owners(
+                        &scratch, source, source_len, def_module, (lang != CBM_LANG_C),
+                        &overlay, imp_keys, imp_vals, imp_count, result->cached_tree,
+                        &out, CBM_SOURCE_ORIGIN_RAW, result)) {
+                    cbm_pipeline_test_owner_error(result);
+                    pxc_scratch_give(PXC_SCRATCH_DISPATCH, &scratch);
+                    return; /* no append and no fallback on an invalid proof */
+                }
+            } else {
+                cbm_run_c_lsp_cross_with_registry(&scratch, source, source_len, def_module,
+                                                  (lang != CBM_LANG_C), &overlay, imp_keys, imp_vals,
+                                                  imp_count, result->cached_tree, &out);
+            }
             used_prebuilt = true;
             break;
         case CBM_LANG_CSHARP:
@@ -1618,8 +1664,16 @@ bool cbm_pxc_build_rust_manifest(const cbm_pipeline_ctx_t *ctx, CBMArena *marena
 
 int cbm_pipeline_pass_lsp_cross(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files,
                                 int file_count, CBMFileResult **cache) {
-    if (!ctx || !files || file_count <= 0 || !cache)
+    if (!ctx) {
         return 0;
+    }
+    if (!files || file_count <= 0 || !cache) {
+        if (atomic_load(&ctx->test_definition_owners_seen)) {
+            atomic_store(&ctx->test_declarations_failed, 1);
+            return CBM_PIPELINE_ABORT_PRESERVE_DB;
+        }
+        return 0;
+    }
 
     cbm_log_info("pass.start", "pass", "lsp_cross", "files", itoa_buf(file_count));
 
@@ -1629,10 +1683,20 @@ int cbm_pipeline_pass_lsp_cross(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *
      * the pointer through the file-static set below. */
     bool have_rust = false;
     for (int i = 0; i < file_count; i++) {
+        if (!cbm_pipeline_test_result_ok(ctx, cache[i])) {
+            return CBM_PIPELINE_ABORT_PRESERVE_DB;
+        }
         if (cache[i] && files[i].language == CBM_LANG_RUST) {
             have_rust = true;
-            break;
         }
+    }
+    bool owner_walk_required = atomic_load(&ctx->test_definition_owners_seen) != 0;
+    char cross_disabled[CBM_SZ_16];
+    if (owner_walk_required &&
+        cbm_safe_getenv("CBM_DISABLE_LSP_CROSS", cross_disabled,
+                        sizeof(cross_disabled), NULL) != NULL) {
+        atomic_store(&ctx->test_declarations_failed, 1);
+        return CBM_PIPELINE_ABORT_PRESERVE_DB;
     }
     CBMArena cargo_arena;
     CBMCargoManifest cargo_manifest;
@@ -1645,9 +1709,18 @@ int cbm_pipeline_pass_lsp_cross(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *
 
     /* Per-file module QN cache so we don't recompute it once per def + once
      * per call. cbm_pipeline_fqn_module mallocs; freed at end. */
-    char **def_modules = (char **)calloc((size_t)file_count, sizeof(char *));
+    char **def_modules = cbm_pipeline_test_force_def_modules_null(ctx) ? NULL :
+        (char **)calloc((size_t)file_count, sizeof(char *));
     if (!def_modules) {
         cbm_log_error("pass.err", "pass", "lsp_cross", "phase", "alloc");
+        if (have_rust) {
+            cbm_pxc_set_rust_manifest(NULL);
+            cbm_arena_destroy(&cargo_arena);
+        }
+        if (owner_walk_required) {
+            atomic_store(&ctx->test_declarations_failed, 1);
+            return CBM_PIPELINE_ABORT_PRESERVE_DB;
+        }
         return 0;
     }
 
@@ -1662,6 +1735,20 @@ int cbm_pipeline_pass_lsp_cross(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *
     CBMLSPDef *all_defs =
         cbm_pxc_collect_all_defs(ctx, &ctx->seq_cross_arena, cache, files, file_count,
                                  ctx->project_name, def_modules, &def_count, def_starts);
+    if (def_count < 0 || (owner_walk_required && (!all_defs || def_count <= 0))) {
+        atomic_store(&ctx->test_declarations_failed, 1);
+        free(def_starts);
+        free(all_defs);
+        for (int i = 0; i < file_count; i++) {
+            free(def_modules[i]);
+        }
+        free(def_modules);
+        if (have_rust) {
+            cbm_pxc_set_rust_manifest(NULL);
+            cbm_arena_destroy(&cargo_arena);
+        }
+        return CBM_PIPELINE_ABORT_PRESERVE_DB;
+    }
     /* Same seam as the parallel driver: serialize per-file surfaces while the
      * result cache is alive. Failure only degrades to a full rebuild on the
      * next incremental run. */
@@ -1709,8 +1796,16 @@ int cbm_pipeline_pass_lsp_cross(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *
     for (int i = 0; i < file_count; i++) {
         if (!cache[i])
             continue;
+        if (!cbm_pipeline_test_result_ok(ctx, cache[i])) {
+            break;
+        }
         CBMLanguage lang = files[i].language;
         if (!cbm_pxc_has_cross_lsp(lang)) {
+            if (cache[i]->has_test_definition_owners) {
+                cbm_pipeline_test_owner_error(cache[i]);
+                (void)cbm_pipeline_test_result_ok(ctx, cache[i]);
+                break;
+            }
             skipped_no_lsp++;
             continue;
         }
@@ -1719,6 +1814,11 @@ int cbm_pipeline_pass_lsp_cross(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *
         char *source = pxc_read_file(files[i].path, &source_len);
         if (!source || source_len <= 0) {
             free(source);
+            if (cache[i]->has_test_definition_owners) {
+                cbm_pipeline_test_owner_error(cache[i]);
+                (void)cbm_pipeline_test_result_ok(ctx, cache[i]);
+                break;
+            }
             skipped_no_source++;
             continue;
         }
@@ -1726,6 +1826,13 @@ int cbm_pipeline_pass_lsp_cross(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *
         if (!def_modules[i]) {
             def_modules[i] = cbm_pipeline_fqn_module_dir(ctx->project_name, files[i].rel_path,
                                                          pxc_module_is_dir(files[i].language));
+        }
+
+        if (!def_modules[i] && cache[i]->has_test_definition_owners) {
+            free(source);
+            cbm_pipeline_test_owner_error(cache[i]);
+            (void)cbm_pipeline_test_result_ok(ctx, cache[i]);
+            break;
         }
 
         const char **imp_keys = NULL;
@@ -1747,6 +1854,9 @@ int cbm_pipeline_pass_lsp_cross(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *
 
         cbm_pxc_free_import_map(imp_keys, imp_vals, imp_count);
         free(source);
+        if (!cbm_pipeline_test_result_ok(ctx, cache[i])) {
+            break;
+        }
     }
 
     cbm_pxc_free_module_def_index(module_def_index);
@@ -1772,7 +1882,8 @@ int cbm_pipeline_pass_lsp_cross(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *
                  "files_skipped_no_lsp", itoa_buf(skipped_no_lsp), "files_skipped_no_source",
                  itoa_buf(skipped_no_source), "defs_total", itoa_buf(def_count), "lsp_calls",
                  itoa_buf(per_lang_calls));
-    return 0;
+    return atomic_load(&ctx->test_declarations_failed)
+               ? CBM_PIPELINE_ABORT_PRESERVE_DB : 0;
 }
 
 /* ── Per-module def index (gopls "package summary" pattern) ──── */

@@ -11,6 +11,7 @@
 #include <limits.h>
 #include <stdint.h>
 #include "foundation/constants.h"
+#include "foundation/arena.h"
 #include "foundation/hash_table.h"
 #include "foundation/sha256.h"
 
@@ -113,6 +114,7 @@ static int bind_text(sqlite3_stmt *s, int col, const char *v) {
 
 struct cbm_store {
     sqlite3 *db;
+    const void *progress_owner; /* exclusive native progress guard token */
     const char *db_path; /* heap-allocated, or NULL for :memory: */
     char errbuf[CBM_SZ_512];
 
@@ -1336,6 +1338,240 @@ int cbm_store_rollback(cbm_store_t *s) {
     return exec_sql(s, "ROLLBACK;");
 }
 
+/* One exclusive native progress owner per connection. SQLite has no getter
+ * for an externally installed handler; direct replacement during this borrow
+ * is outside the request-owned connection contract. */
+static bool store_progress_acquire(cbm_store_t *s, const void *owner, int interval,
+                                    int (*callback)(void *), void *context) {
+    if (!s || !s->db || !owner || s->progress_owner) {
+        return false;
+    }
+    s->progress_owner = owner;
+    sqlite3_progress_handler(s->db, interval, callback, context);
+    return true;
+}
+
+static bool store_progress_release(cbm_store_t *s, const void *owner) {
+    if (!s || !s->db || s->progress_owner != owner) {
+        return false;
+    }
+    sqlite3_progress_handler(s->db, 0, NULL, NULL);
+    s->progress_owner = NULL;
+    return true;
+}
+
+struct cbm_store_read_scope {
+    CBMArena arena;
+    cbm_store_t *store;
+    cbm_store_cancel_fn cancel;
+    void *context;
+    int status;
+    int saved_query_only;
+    int saved_busy_timeout;
+    bool query_only_saved;
+    bool busy_timeout_saved;
+    bool query_only_changed;
+    bool busy_timeout_changed;
+    bool transaction;
+    bool progress_owned;
+    sqlite3_stmt *pin;
+};
+
+int cbm_store_read_scope_fail(cbm_store_read_scope_t *scope, int status) {
+    if (!scope) {
+        return CBM_STORE_ERR;
+    }
+    if (scope->status == CBM_STORE_OK) {
+        scope->status = status == CBM_STORE_CANCELLED ? CBM_STORE_CANCELLED : CBM_STORE_ERR;
+    }
+    return scope->status;
+}
+
+/* This helper is also called from SQLite. It must not enter SQLite itself. */
+static int store_scope_poll(cbm_store_read_scope_t *scope) {
+    if (scope->status == CBM_STORE_OK && scope->cancel && scope->cancel(scope->context)) {
+        scope->status = CBM_STORE_CANCELLED;
+    }
+    return scope->status;
+}
+
+static int store_scope_progress(void *context) {
+    return store_scope_poll((cbm_store_read_scope_t *)context) != CBM_STORE_OK;
+}
+
+int cbm_store_read_scope_check(cbm_store_read_scope_t *scope) {
+    if (!scope) {
+        return CBM_STORE_ERR;
+    }
+    if (store_scope_poll(scope) != CBM_STORE_OK) {
+        return scope->status;
+    }
+    if (!scope->transaction || !scope->store || !scope->store->db ||
+        scope->store->progress_owner != scope || sqlite3_get_autocommit(scope->store->db)) {
+        return cbm_store_read_scope_fail(scope, CBM_STORE_ERR);
+    }
+    return CBM_STORE_OK;
+}
+
+cbm_store_t *cbm_store_read_scope_store(const cbm_store_read_scope_t *scope) {
+    return scope ? scope->store : NULL;
+}
+
+static bool store_scope_pragma_get(cbm_store_t *s, const char *sql, int *out) {
+    sqlite3_stmt *stmt = NULL;
+    bool ok = sqlite3_prepare_v2(s->db, sql, CBM_NOT_FOUND, &stmt, NULL) == SQLITE_OK;
+    if (ok) {
+        ok = sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_type(stmt, 0) == SQLITE_INTEGER;
+        if (ok) {
+            *out = sqlite3_column_int(stmt, 0);
+            ok = sqlite3_step(stmt) == SQLITE_DONE;
+        }
+    }
+    if (sqlite3_finalize(stmt) != SQLITE_OK) {
+        ok = false;
+    }
+    return ok;
+}
+
+/* No callback is invoked during cleanup. Even failed open has to report a
+ * restoration error distinctly: the caller has no scope left to inspect. */
+static int store_scope_cleanup(cbm_store_read_scope_t *scope) {
+    cbm_store_t *s = scope->store;
+    bool clean = true;
+    if (scope->progress_owned) {
+        clean = store_progress_release(s, scope);
+        scope->progress_owned = false;
+    }
+    if (scope->pin) {
+        /* reset may report the preceding interrupted step, not a new cleanup
+         * failure. finalize still destroys this exclusively owned statement. */
+        sqlite3_reset(scope->pin);
+        if (sqlite3_finalize(scope->pin) != SQLITE_OK) {
+            clean = false;
+        }
+        scope->pin = NULL;
+    }
+    if (scope->transaction) {
+        if (sqlite3_get_autocommit(s->db)) {
+            cbm_store_read_scope_fail(scope, CBM_STORE_ERR);
+        } else if (exec_sql(s, "ROLLBACK;") != CBM_STORE_OK || !sqlite3_get_autocommit(s->db)) {
+            clean = false;
+        }
+        scope->transaction = false;
+    }
+    if (scope->query_only_changed && scope->query_only_saved) {
+        const char *sql = scope->saved_query_only ? "PRAGMA query_only=ON;" : "PRAGMA query_only=OFF;";
+        int restored = -1;
+        if (exec_sql(s, sql) != CBM_STORE_OK ||
+            !store_scope_pragma_get(s, "PRAGMA query_only;", &restored) ||
+            restored != scope->saved_query_only) {
+            clean = false;
+        }
+    }
+    if (scope->busy_timeout_changed && scope->busy_timeout_saved) {
+        int restored = -1;
+        if (sqlite3_busy_timeout(s->db, scope->saved_busy_timeout) != SQLITE_OK ||
+            !store_scope_pragma_get(s, "PRAGMA busy_timeout;", &restored) ||
+            restored != scope->saved_busy_timeout) {
+            clean = false;
+        }
+    }
+    int status = clean ? scope->status : CBM_STORE_SCOPE_DISCARD;
+    CBMArena arena = scope->arena; /* scope itself lives in this arena */
+    cbm_arena_destroy(&arena);
+    return status;
+}
+
+int cbm_store_read_scope_close(cbm_store_read_scope_t *scope) {
+    return scope ? store_scope_cleanup(scope) : CBM_STORE_OK;
+}
+
+int cbm_store_read_scope_open(cbm_store_t *s, cbm_store_cancel_fn cancel, void *context,
+                              cbm_store_read_scope_t **out) {
+    if (out) {
+        *out = NULL;
+    }
+    if (!s || !s->db || !out || s->progress_owner || !sqlite3_get_autocommit(s->db)) {
+        return CBM_STORE_ERR;
+    }
+    for (sqlite3_stmt *stmt = sqlite3_next_stmt(s->db, NULL); stmt;
+         stmt = sqlite3_next_stmt(s->db, stmt)) {
+        if (sqlite3_stmt_busy(stmt)) {
+            return CBM_STORE_ERR;
+        }
+    }
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    cbm_store_read_scope_t *scope = cbm_arena_calloc(&arena, sizeof(*scope));
+    if (!scope) {
+        cbm_arena_destroy(&arena);
+        return CBM_STORE_ERR;
+    }
+    scope->arena = arena;
+    scope->store = s;
+    scope->cancel = cancel;
+    scope->context = context;
+    if (store_scope_poll(scope) != CBM_STORE_OK) {
+        return store_scope_cleanup(scope);
+    }
+    if (!store_progress_acquire(s, scope, 1000, store_scope_progress, scope)) {
+        cbm_store_read_scope_fail(scope, CBM_STORE_ERR);
+        return store_scope_cleanup(scope);
+    }
+    scope->progress_owned = true;
+    if (!store_scope_pragma_get(s, "PRAGMA busy_timeout;", &scope->saved_busy_timeout) ||
+        scope->saved_busy_timeout < 0) {
+        goto fail;
+    }
+    scope->busy_timeout_saved = true;
+    scope->busy_timeout_changed = true;
+    if (sqlite3_busy_timeout(s->db, 0) != SQLITE_OK || store_scope_poll(scope) != CBM_STORE_OK) {
+        goto fail;
+    }
+    if (!store_scope_pragma_get(s, "PRAGMA query_only;", &scope->saved_query_only) ||
+        (scope->saved_query_only != 0 && scope->saved_query_only != 1)) {
+        goto fail;
+    }
+    scope->query_only_saved = true;
+    scope->query_only_changed = true;
+    int query_only = 0;
+    if (exec_sql(s, "PRAGMA query_only=ON;") != CBM_STORE_OK ||
+        !store_scope_pragma_get(s, "PRAGMA query_only;", &query_only) || query_only != 1 ||
+        store_scope_poll(scope) != CBM_STORE_OK) {
+        goto fail;
+    }
+    int begin_status = exec_sql(s, "BEGIN DEFERRED;");
+    scope->transaction = !sqlite3_get_autocommit(s->db);
+    if (begin_status != CBM_STORE_OK || !scope->transaction ||
+        store_scope_poll(scope) != CBM_STORE_OK) {
+        goto fail;
+    }
+    /* BEGIN alone is not a snapshot. This real main-table read opens one even
+     * for an empty graph; finalizing the statement retains the transaction. */
+    if (sqlite3_prepare_v2(s->db, "SELECT id FROM main.nodes LIMIT 1;", CBM_NOT_FOUND,
+                           &scope->pin, NULL) != SQLITE_OK) {
+        goto fail;
+    }
+    int step = sqlite3_step(scope->pin);
+    if (step != SQLITE_ROW && step != SQLITE_DONE) {
+        goto fail;
+    }
+    if (sqlite3_reset(scope->pin) != SQLITE_OK) {
+        goto fail;
+    }
+    int final = sqlite3_finalize(scope->pin);
+    scope->pin = NULL;
+    if (final != SQLITE_OK || cbm_store_read_scope_check(scope) != CBM_STORE_OK) {
+        goto fail;
+    }
+    *out = scope;
+    return CBM_STORE_OK;
+
+fail:
+    cbm_store_read_scope_fail(scope, CBM_STORE_ERR);
+    return store_scope_cleanup(scope);
+}
+
 /* ── Graph comparison ────────────────────────────────────────────── */
 
 typedef struct {
@@ -1749,9 +1985,15 @@ int cbm_store_compare_graphs(cbm_store_t *base_store, const char *base_project,
     bool base_transaction = false;
     bool target_transaction = false;
     int progress_interval = graph_compare_progress_interval();
-    sqlite3_progress_handler(base_store->db, progress_interval, graph_compare_progress, &progress);
-    sqlite3_progress_handler(target_store->db, progress_interval, graph_compare_progress,
-                             &progress);
+    if (!store_progress_acquire(base_store, &progress, progress_interval,
+                                 graph_compare_progress, &progress)) {
+        return CBM_STORE_ERR;
+    }
+    if (!store_progress_acquire(target_store, &progress, progress_interval,
+                                 graph_compare_progress, &progress)) {
+        store_progress_release(base_store, &progress);
+        return CBM_STORE_ERR;
+    }
 
     rc = exec_sql(base_store, "BEGIN;");
     if (rc == CBM_STORE_OK) {
@@ -1787,8 +2029,8 @@ int cbm_store_compare_graphs(cbm_store_t *base_store, const char *base_project,
         rc = CBM_STORE_CANCELLED;
     }
 
-    sqlite3_progress_handler(base_store->db, 0, NULL, NULL);
-    sqlite3_progress_handler(target_store->db, 0, NULL, NULL);
+    store_progress_release(base_store, &progress);
+    store_progress_release(target_store, &progress);
     if (target_transaction && exec_sql(target_store, "ROLLBACK;") != CBM_STORE_OK &&
         rc == CBM_STORE_OK) {
         rc = CBM_STORE_ERR;
@@ -2962,20 +3204,22 @@ int cbm_store_get_file_outline(cbm_store_t *s, const char *project, const char *
     if (file_outline_cancelled(&guard)) {
         return CBM_STORE_CANCELLED;
     }
-    if (cancel) {
-        sqlite3_progress_handler(s->db, 1000, file_outline_progress_cancel, &guard);
+    /* Even a NULL cancellation callback must claim ownership: otherwise
+     * this operation's cleanup could remove a surrounding scope's handler. */
+    if (!store_progress_acquire(s, &guard, 1000, file_outline_progress_cancel, &guard)) {
+        return CBM_STORE_ERR;
     }
 
     char sql[ST_SQL_BUF];
     if (!file_outline_build_sql(sql, sizeof(sql), true, label_count)) {
-        sqlite3_progress_handler(s->db, 0, NULL, NULL);
+        store_progress_release(s, &guard);
         return CBM_STORE_ERR;
     }
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(s->db, sql, CBM_NOT_FOUND, &stmt, NULL);
     if (rc != SQLITE_OK) {
         store_set_error_sqlite(s, "file outline count prepare");
-        sqlite3_progress_handler(s->db, 0, NULL, NULL);
+        store_progress_release(s, &guard);
         return CBM_STORE_ERR;
     }
     file_outline_bind_common(stmt, project, file_path, labels, label_count);
@@ -2985,19 +3229,19 @@ int cbm_store_get_file_outline(cbm_store_t *s, const char *project, const char *
     }
     sqlite3_finalize(stmt);
     if (rc == SQLITE_INTERRUPT || file_outline_cancelled(&guard)) {
-        sqlite3_progress_handler(s->db, 0, NULL, NULL);
+        store_progress_release(s, &guard);
         *total = 0;
         return CBM_STORE_CANCELLED;
     }
     if (rc != SQLITE_ROW) {
         store_set_error_sqlite(s, "file outline count");
-        sqlite3_progress_handler(s->db, 0, NULL, NULL);
+        store_progress_release(s, &guard);
         *total = 0;
         return CBM_STORE_ERR;
     }
 
     if (!file_outline_build_sql(sql, sizeof(sql), false, label_count)) {
-        sqlite3_progress_handler(s->db, 0, NULL, NULL);
+        store_progress_release(s, &guard);
         *total = 0;
         return CBM_STORE_ERR;
     }
@@ -3005,7 +3249,7 @@ int cbm_store_get_file_outline(cbm_store_t *s, const char *project, const char *
     rc = sqlite3_prepare_v2(s->db, sql, CBM_NOT_FOUND, &stmt, NULL);
     if (rc != SQLITE_OK) {
         store_set_error_sqlite(s, "file outline prepare");
-        sqlite3_progress_handler(s->db, 0, NULL, NULL);
+        store_progress_release(s, &guard);
         *total = 0;
         return CBM_STORE_ERR;
     }
@@ -3016,7 +3260,7 @@ int cbm_store_get_file_outline(cbm_store_t *s, const char *project, const char *
     cbm_file_outline_row_t *rows = calloc((size_t)limit, sizeof(*rows));
     if (!rows) {
         sqlite3_finalize(stmt);
-        sqlite3_progress_handler(s->db, 0, NULL, NULL);
+        store_progress_release(s, &guard);
         *total = 0;
         return CBM_STORE_ERR;
     }
@@ -3040,7 +3284,7 @@ int cbm_store_get_file_outline(cbm_store_t *s, const char *project, const char *
                            (size_t)sqlite3_column_bytes(stmt, 2) + 3U;
         if (row_bytes > CBM_STORE_FILE_OUTLINE_MAX_TEXT_BYTES - text_bytes) {
             sqlite3_finalize(stmt);
-            sqlite3_progress_handler(s->db, 0, NULL, NULL);
+            store_progress_release(s, &guard);
             cbm_store_free_file_outline(rows, n);
             *total = 0;
             return CBM_STORE_SCAN_LIMIT;
@@ -3052,7 +3296,7 @@ int cbm_store_get_file_outline(cbm_store_t *s, const char *project, const char *
         rows[n].end_line = sqlite3_column_int(stmt, 4);
         if (!rows[n].name || !rows[n].label || !rows[n].qualified_name) {
             sqlite3_finalize(stmt);
-            sqlite3_progress_handler(s->db, 0, NULL, NULL);
+            store_progress_release(s, &guard);
             cbm_store_free_file_outline(rows, n + 1);
             *total = 0;
             return CBM_STORE_ERR;
@@ -3062,7 +3306,7 @@ int cbm_store_get_file_outline(cbm_store_t *s, const char *project, const char *
     }
     was_cancelled = was_cancelled || rc == SQLITE_INTERRUPT || file_outline_cancelled(&guard);
     sqlite3_finalize(stmt);
-    sqlite3_progress_handler(s->db, 0, NULL, NULL);
+    store_progress_release(s, &guard);
     if (was_cancelled) {
         cbm_store_free_file_outline(rows, n);
         *total = 0;

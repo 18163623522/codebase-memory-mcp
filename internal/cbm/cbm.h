@@ -17,6 +17,27 @@ TSNode cbm_ts_child_by_field_name(TSNode node, const char *name, uint32_t name_l
  * (TS_FIELD("body") expands to "body", 4), which must expand before the call. */
 #define ts_node_child_by_field_name(...) cbm_ts_child_by_field_name(__VA_ARGS__)
 
+/* Immutable, explicitly supplied test-declaration snapshot. */
+typedef struct cbm_test_declarations cbm_test_declarations_t;
+
+typedef enum {
+    CBM_TEST_ROLE_NONE = 0,
+    CBM_TEST_ROLE_CASE,
+    CBM_TEST_ROLE_SUITE
+} CBMTestDefinitionRole;
+
+typedef enum {
+    CBM_TEST_EXTRACT_OK = 0,
+    CBM_TEST_EXTRACT_UNSUPPORTED_LANGUAGE,
+    CBM_TEST_EXTRACT_UNSUPPORTED_PRESET,
+    CBM_TEST_EXTRACT_UNSUPPORTED_NAME,
+    CBM_TEST_EXTRACT_MISSING_ARGUMENT,
+    CBM_TEST_EXTRACT_UNSUPPORTED_ARGUMENT,
+    CBM_TEST_EXTRACT_AMBIGUOUS,
+    CBM_TEST_EXTRACT_UNSUPPORTED_FORM,
+    CBM_TEST_EXTRACT_OOM
+} CBMTestExtractStatus;
+
 // Language enum mirrors lang.Language in Go.
 // Order must match lang_specs.c tables.
 typedef enum {
@@ -246,6 +267,11 @@ typedef struct {
      * HTTP_CALLS edge to base + path. Tail fields: zero-init stays valid. */
     const char *http_client;
     const char *http_base_url;
+    CBMTestDefinitionRole test_role; /* NONE preserves legacy helper/test-file semantics */
+    /* Configured raw definitions only; zero for all legacy rows. Exact spans
+     * are bound to the owning result's source identity before cross-file use. */
+    uint32_t test_name_start_byte, test_name_end_byte;
+    uint32_t test_body_start_byte, test_body_end_byte;
 } CBMDefinition;
 
 /* Argument captured from a call expression */
@@ -610,6 +636,15 @@ typedef struct CBMFileResult {
     // by cbm_free_result(); ordinary single-file results leave these zeroed.
     struct CBMFileResult **owned_results;
     int owned_result_count;
+    /* A consumed configured definition could not be mapped safely. Pipeline
+     * callers must abort publication; error_msg is arena-owned as usual. */
+    CBMTestExtractStatus test_declarations_status;
+    int test_declaration_index; /* meaningful on failure; -1 = preset */
+    uint32_t test_declaration_line; /* 0 = snapshot preflight */
+    bool has_test_definition_owners;
+    int test_owner_source_len;
+    CBMLanguage test_owner_language;
+    char test_owner_source_sha256[65]; /* exact raw source; identity, not authentication */
 } CBMFileResult;
 
 // --- Enclosing function cache ---
@@ -696,7 +731,25 @@ typedef struct {
     /* How many nodes the unified walk actually visited (whether or not it ran
      * out of budget) — the measurement the budget has to be expressed in. */
     uint32_t walk_nodes_visited;
+    const cbm_test_declarations_t *test_declarations; /* borrowed for this call only */
+    bool test_declarations_raw_source;
+    struct CBMTestDefinitionMatch *test_definition_matches; /* traversal scratch */
+    int test_definition_match_count;
+    int test_definition_match_cap;
 } CBMExtractCtx;
+
+/* Internal configured-definition seams. No declarations pointer enters a result. */
+bool cbm_test_declarations_validate(CBMFileResult *result,
+                                    const cbm_test_declarations_t *declarations);
+void cbm_test_declarations_finish(CBMExtractCtx *ctx);
+/* Raw AST candidate only: no declaration/configuration decisions. A C split
+ * invocation uses its adjacent compound body as scope; ordinary definitions
+ * use their function node. Callers still validate raw bytes before ownership. */
+bool cbm_test_definition_candidate(TSNode scope, CBMLanguage language, TSNode *name, TSNode *body);
+const char *cbm_test_definition_qn(CBMExtractCtx *ctx, TSNode function);
+bool cbm_test_definition_owners_match(const CBMFileResult *owners, const char *source,
+                                      int source_len, bool cpp_mode, const char *module_qn);
+const char *cbm_test_definition_owner_qn(const CBMFileResult *owners, TSNode function);
 
 // --- Public API ---
 
@@ -799,6 +852,17 @@ CBMFileResult *cbm_extract_file_ex(
     const CBMMacroTable *macro_table,           // ObjectScript macros, or NULL
     const CBMReturnTypeTable *return_type_table // OS return types, or NULL
 );
+
+/* Additive immutable-snapshot entry point. NULL preserves legacy behavior.
+ * Snapshot must outlive this call; returned data is independently result-owned.
+ * A non-OK result status is an explicit configured-mapping failure, not a
+ * successful empty inventory. error_msg may be NULL on diagnostic OOM. */
+CBMFileResult *cbm_extract_file_ex_with_tests(
+    const char *source, int source_len, CBMLanguage language, const char *project,
+    const char *rel_path, int64_t timeout_micros,
+    const char **extra_defines, const char **include_paths,
+    const CBMMacroTable *macro_table, const CBMReturnTypeTable *return_type_table,
+    const cbm_test_declarations_t *test_declarations);
 
 // Free all memory associated with a result.
 void cbm_free_result(CBMFileResult *result);

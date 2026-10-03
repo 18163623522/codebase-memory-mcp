@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Per-test selection in the C test runner: CBM_TEST_ONLY / CBM_TEST_ONLY_FILE.
 #
-# The test-impact selector hands the runner `suite:test` tokens. Two properties
+# The test-impact selector hands the runner bare suites or `suite:test` tokens.
+# Two properties
 # make that safe to gate on, and both are process-level behaviour a suite cannot
 # assert about the runner that is executing it:
 #   1. exactly the named tests run: the other tests of a named suite are counted
@@ -9,9 +10,9 @@
 #   2. a token that matches nothing is an ERROR. A selection that quietly ran
 #      fewer tests than it named would report green for work that never ran.
 #
-# Every case drives the built runner over two small in-memory suites, so the
-# whole script is a dozen runner starts. Expected counts are read from the suite
-# sources, never hard-coded, so adding a test to either suite cannot stale them.
+# Every case drives the built runner over two small in-memory suites. Expected
+# counts are read from the suite sources, never hard-coded, so adding a test to
+# either suite cannot stale them.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -236,11 +237,155 @@ expect "PASS lines" "$(pass_lines)" 0
 finish
 
 begin "malformed token fails before any test"
-CBM_TEST_ONLY="${NAMED_SUITE}" run malformed "${NAMED_SUITE}"
+CBM_TEST_ONLY="${NAMED_SUITE}:" run malformed "${NAMED_SUITE}"
 expect_nonzero_exit
-expect_line "malformed test selection token: ${NAMED_SUITE}"
+expect_line "malformed test selection token: ${NAMED_SUITE}:"
 expect "PASS lines" "$(pass_lines)" 0
 finish
+
+# ── Whole suites use the same executable filter in environment and file form ──
+begin "CBM_TEST_ONLY runs every test of a bare suite"
+CBM_TEST_ONLY="${NAMED_SUITE}" run whole-env "${NAMED_SUITE}" "${OTHER_SUITE}"
+expect "exit status" "${RC}" 0
+expect "passed" "$(summary_count passed)" "${NAMED_TOTAL}"
+expect "deselected" "$(summary_count deselected)" 0
+expect "PASS lines" "$(pass_lines)" "${NAMED_TOTAL}"
+expect_no_line "=== ${OTHER_SUITE} ==="
+finish
+
+whole_selection="${tmpdir}/whole.txt"
+printf '%s\r\n' "# whole suite" "" "   ${NAMED_SUITE}   # trailing comment" > "${whole_selection}"
+begin "CBM_TEST_ONLY_FILE accepts a bare suite with whitespace comments and CRLF"
+CBM_TEST_ONLY_FILE="${whole_selection}" run whole-file "${NAMED_SUITE}" "${OTHER_SUITE}"
+expect "exit status" "${RC}" 0
+expect "passed" "$(summary_count passed)" "${NAMED_TOTAL}"
+expect "deselected" "$(summary_count deselected)" 0
+expect "PASS lines" "$(pass_lines)" "${NAMED_TOTAL}"
+expect_no_line "=== ${OTHER_SUITE} ==="
+finish
+
+begin "whole suite and individual tokens compose in the environment"
+CBM_TEST_ONLY="${NAMED_SUITE},${OTHER_SUITE}:${OTHER_TEST}" \
+    run whole-mixed-env "${NAMED_SUITE}" "${OTHER_SUITE}"
+expect "exit status" "${RC}" 0
+expect "passed" "$(summary_count passed)" "$((NAMED_TOTAL + 1))"
+expect "deselected" "$(summary_count deselected)" "$((OTHER_TOTAL - 1))"
+expect "PASS lines" "$(pass_lines)" "$((NAMED_TOTAL + 1))"
+expect_line "  ${OTHER_TEST} "
+finish
+
+printf '%s\n' "${NAMED_SUITE}" "${OTHER_SUITE}:${OTHER_TEST}" > "${tmpdir}/mixed.txt"
+begin "whole suite and individual tokens compose in a file"
+CBM_TEST_ONLY_FILE="${tmpdir}/mixed.txt" run whole-mixed-file "${NAMED_SUITE}" "${OTHER_SUITE}"
+expect "exit status" "${RC}" 0
+expect "passed" "$(summary_count passed)" "$((NAMED_TOTAL + 1))"
+expect "deselected" "$(summary_count deselected)" "$((OTHER_TOTAL - 1))"
+expect "PASS lines" "$(pass_lines)" "$((NAMED_TOTAL + 1))"
+expect_line "  ${OTHER_TEST} "
+finish
+
+printf '%s\n' "${NAMED_SUITE}" "${NAMED_SUITE}" "${NAMED_SUITE}:da_last" \
+    "${OTHER_SUITE}:${OTHER_TEST}" "${OTHER_SUITE}:${OTHER_TEST}" > "${tmpdir}/duplicates.txt"
+begin "duplicate whole and individual tokens never duplicate execution"
+CBM_TEST_ONLY="${NAMED_SUITE}:da_last,${NAMED_SUITE},${OTHER_SUITE}:${OTHER_TEST}" \
+    CBM_TEST_ONLY_FILE="${tmpdir}/duplicates.txt" \
+    run whole-duplicates "${NAMED_SUITE}" "${OTHER_SUITE}"
+expect "exit status" "${RC}" 0
+expect "passed" "$(summary_count passed)" "$((NAMED_TOTAL + 1))"
+expect "deselected" "$(summary_count deselected)" "$((OTHER_TOTAL - 1))"
+expect "PASS lines" "$(pass_lines)" "$((NAMED_TOTAL + 1))"
+finish
+
+begin "unknown bare suite is named as unknown rather than malformed"
+CBM_TEST_ONLY="no_such_whole_suite" run whole-unknown "${NAMED_SUITE}"
+expect_nonzero_exit
+expect_line "${UNKNOWN_MESSAGE} no_such_whole_suite"
+expect_no_line "malformed test selection token:"
+expect "PASS lines" "$(pass_lines)" 0
+finish
+
+printf '%s\n' "no_such_whole_suite" > "${tmpdir}/unknown-whole.txt"
+begin "unknown bare suite in a file remains an error"
+CBM_TEST_ONLY_FILE="${tmpdir}/unknown-whole.txt" run whole-unknown-file "${NAMED_SUITE}"
+expect_nonzero_exit
+expect_line "${UNKNOWN_MESSAGE} no_such_whole_suite"
+expect_no_line "malformed test selection token:"
+expect "PASS lines" "$(pass_lines)" 0
+finish
+
+begin "whole suite never hides a separately unknown individual"
+CBM_TEST_ONLY="${NAMED_SUITE},${NAMED_SUITE}:no_such_test" \
+    run whole-unknown-individual "${NAMED_SUITE}"
+expect_nonzero_exit
+expect_line "${UNKNOWN_MESSAGE} ${NAMED_SUITE}:no_such_test"
+expect "passed" "$(summary_count passed)" "${NAMED_TOTAL}"
+expect "deselected" "$(summary_count deselected)" 0
+expect "PASS lines" "$(pass_lines)" "${NAMED_TOTAL}"
+finish
+
+printf '%s\n' "${NAMED_SUITE}:no_such_test" > "${tmpdir}/unknown-individual.txt"
+begin "whole suite never hides an unknown individual from the other input"
+CBM_TEST_ONLY="${NAMED_SUITE}" CBM_TEST_ONLY_FILE="${tmpdir}/unknown-individual.txt" \
+    run whole-unknown-union "${NAMED_SUITE}"
+expect_nonzero_exit
+expect_line "${UNKNOWN_MESSAGE} ${NAMED_SUITE}:no_such_test"
+expect "passed" "$(summary_count passed)" "${NAMED_TOTAL}"
+expect "PASS lines" "$(pass_lines)" "${NAMED_TOTAL}"
+finish
+
+begin "whole suite outside argv belongs to another runner process"
+CBM_TEST_ONLY="${OTHER_SUITE},${NAMED_SUITE}:da_last" run whole-argv "${NAMED_SUITE}"
+expect "exit status" "${RC}" 0
+expect "passed" "$(summary_count passed)" 1
+expect "deselected" "$(summary_count deselected)" "$((NAMED_TOTAL - 1))"
+expect "PASS lines" "$(pass_lines)" 1
+expect_no_line "=== ${OTHER_SUITE} ==="
+finish
+
+begin "individual outside argv does not interfere with a selected whole suite"
+CBM_TEST_ONLY="${NAMED_SUITE},${OTHER_SUITE}:${OTHER_TEST}" run whole-argv-inverse "${NAMED_SUITE}"
+expect "exit status" "${RC}" 0
+expect "passed" "$(summary_count passed)" "${NAMED_TOTAL}"
+expect "deselected" "$(summary_count deselected)" 0
+expect "PASS lines" "$(pass_lines)" "${NAMED_TOTAL}"
+expect_no_line "=== ${OTHER_SUITE} ==="
+finish
+
+# ── The wire limit counts token bytes, including the individual-token colon.
+# These names intentionally do not exist: valid syntax must reach unknown-token
+# validation, while an over-width token must fail before executing any test.
+for token_kind in suite individual; do
+    for width in 511 512; do
+        token_prefix=""
+        if [[ "${token_kind}" == individual ]]; then
+            token_prefix="${NAMED_SUITE}:"
+        fi
+        printf -v token_suffix '%*s' "$((width - ${#token_prefix}))" ''
+        token_suffix="${token_suffix// /q}"
+        width_token="${token_prefix}${token_suffix}"
+        printf '%s\n' "${width_token}" > "${tmpdir}/width.txt"
+        for input_kind in env file; do
+            begin "${width}-byte ${token_kind} token through ${input_kind}"
+            if [[ "${input_kind}" == env ]]; then
+                CBM_TEST_ONLY="${width_token}" \
+                    run "width-${token_kind}-${width}-${input_kind}" "${NAMED_SUITE}"
+            else
+                CBM_TEST_ONLY_FILE="${tmpdir}/width.txt" \
+                    run "width-${token_kind}-${width}-${input_kind}" "${NAMED_SUITE}"
+            fi
+            expect_nonzero_exit
+            expect "PASS lines" "$(pass_lines)" 0
+            if [[ "${width}" -eq 511 ]]; then
+                expect_line "${UNKNOWN_MESSAGE} ${width_token}"
+                expect_no_line "malformed test selection token:"
+            else
+                expect_line "malformed test selection token:"
+                expect_no_line "${UNKNOWN_MESSAGE}"
+            fi
+            finish
+        done
+    done
+done
 
 if [[ "${FAILURES}" -gt 0 ]]; then
     echo "FAIL: ${FAILURES} per-test selection case(s) failed"

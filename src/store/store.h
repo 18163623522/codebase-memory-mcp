@@ -17,6 +17,7 @@
 /* ── Opaque handle ──────────────────────────────────────────────── */
 
 typedef struct cbm_store cbm_store_t;
+typedef struct cbm_store_read_scope cbm_store_read_scope_t;
 
 /* ── Result codes ───────────────────────────────────────────────── */
 
@@ -27,6 +28,8 @@ typedef struct cbm_store cbm_store_t;
 #define CBM_STORE_CANCELLED (-3)
 #define CBM_STORE_SCAN_LIMIT (-4)
 #define CBM_STORE_CALLBACK_ERR (-5)
+/* Read-scope cleanup could not restore the connection: close/discard it. */
+#define CBM_STORE_SCOPE_DISCARD (-6)
 
 #define CBM_STORE_FILE_OUTLINE_MAX_LIMIT 200
 #define CBM_STORE_FILE_OUTLINE_MAX_LABELS 16
@@ -424,6 +427,28 @@ int cbm_store_commit(cbm_store_t *s);
 
 /* Rollback the current transaction. */
 int cbm_store_rollback(cbm_store_t *s);
+
+/* Stable request read scope. Borrows an exclusively owned, single-thread
+ * store and callback context. Refuses a transaction, busy statement or owned
+ * progress handler; idle cached statements are allowed. Saves query_only and
+ * busy_timeout, sets ON/0, begins DEFERRED and pins main.nodes before returning.
+ * The cancellation callback is a pure predicate: no SQLite/store/scope/walk
+ * calls. Do not replace connection handlers, transactions or close the store
+ * during the borrow. Close walks first, then the scope, then the store.
+ *
+ * Open clears *out. Any cleanup/restoration failure, including failed open,
+ * returns SCOPE_DISCARD: the caller MUST discard this connection. */
+int cbm_store_read_scope_open(cbm_store_t *s, cbm_store_cancel_fn cancel, void *context,
+                              cbm_store_read_scope_t **out);
+/* First cancellation/error is sticky. Check also rejects a lost transaction. */
+int cbm_store_read_scope_check(cbm_store_read_scope_t *scope);
+/* Consumer failure: accepts ERR or CANCELLED; other values latch ERR. */
+int cbm_store_read_scope_fail(cbm_store_read_scope_t *scope, int status);
+/* Borrowed store binding, not a health check or certification. */
+cbm_store_t *cbm_store_read_scope_store(const cbm_store_read_scope_t *scope);
+/* Disables its handler before cleanup. Returns latched status unless cleanup
+ * fails (SCOPE_DISCARD). NULL is OK. Frees scope on every non-NULL call. */
+int cbm_store_read_scope_close(cbm_store_read_scope_t *scope);
 
 /* ── Bulk write optimization ────────────────────────────────────── */
 

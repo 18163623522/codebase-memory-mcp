@@ -1300,6 +1300,18 @@ const char *cbm_enclosing_func_qn(CBMArena *a, TSNode node, CBMLanguage lang, co
 // --- Cached enclosing function QN ---
 
 const char *cbm_enclosing_func_qn_cached(CBMExtractCtx *ctx, TSNode node) {
+    if (ctx->test_definition_match_count > 0) {
+        const char **function_kinds = func_kinds_for_lang(ctx->language);
+        for (TSNode current = node; !ts_node_is_null(current); current = ts_node_parent(current)) {
+            const char *configured_qn = cbm_test_definition_qn(ctx, current);
+            if (configured_qn)
+                return configured_qn;
+            /* A nested native function owns its own body; do not inherit a
+             * surrounding configured macro's QN through that boundary. */
+            if (cbm_kind_in_set(current, function_kinds))
+                break;
+        }
+    }
     uint32_t pos = ts_node_start_byte(node);
 
     // Check cache: find a function range that contains this position.

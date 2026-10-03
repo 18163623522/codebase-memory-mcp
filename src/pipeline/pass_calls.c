@@ -45,6 +45,7 @@ static bool pc_module_is_dir(CBMLanguage lang) {
 
 /* Read entire file into heap-allocated buffer. Caller must free(). */
 static char *read_file(const char *path, int *out_len) {
+    *out_len = -1; /* unknown/read failure; zero is a proven empty file */
     FILE *f = cbm_fopen(path, "rb");
     if (!f) {
         return NULL;
@@ -55,6 +56,9 @@ static char *read_file(const char *path, int *out_len) {
     (void)fseek(f, 0, SEEK_SET);
 
     if (size <= 0 || size > cbm_max_file_bytes()) { /* generous, env-configurable cap (B4) */
+        if (size == 0) {
+            *out_len = 0;
+        }
         (void)fclose(f);
         return NULL;
     }
@@ -1004,12 +1008,17 @@ static CBMFileResult *calls_get_or_extract(cbm_pipeline_ctx_t *ctx, int idx,
     int slen = 0;
     char *src = read_file(fi->path, &slen);
     if (!src) {
+        if (slen != 0) {
+            (void)cbm_pipeline_test_extraction_ok(ctx, fi->language, NULL);
+        }
         return NULL;
     }
-    CBMFileResult *r = cbm_extract_file_ex(src, slen, fi->language, ctx->project_name, fi->rel_path,
-                                           CBM_EXTRACT_BUDGET, NULL, NULL, ctx->macro_table,
-                                           ctx->return_type_table);
+    CBMFileResult *r = cbm_pipeline_test_force_extract_null(ctx, fi->language) ? NULL :
+        cbm_extract_file_ex_with_tests(
+        src, slen, fi->language, ctx->project_name, fi->rel_path, CBM_EXTRACT_BUDGET,
+        NULL, NULL, ctx->macro_table, ctx->return_type_table, ctx->test_declarations);
     free(src);
+    (void)cbm_pipeline_test_extraction_ok(ctx, fi->language, r);
     if (r) {
         *owned = true;
     }
@@ -1043,8 +1052,18 @@ int cbm_pipeline_pass_calls(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *file
         bool result_owned = false;
         CBMFileResult *result = calls_get_or_extract(ctx, i, &files[i], &result_owned);
         if (!result) {
+            if (atomic_load(&ctx->test_declarations_failed)) {
+                return CBM_PIPELINE_ABORT_PRESERVE_DB;
+            }
             errors++;
             continue;
+        }
+
+        if (!cbm_pipeline_test_result_ok(ctx, result)) {
+            if (result_owned) {
+                cbm_free_result(result);
+            }
+            return CBM_PIPELINE_ABORT_PRESERVE_DB;
         }
 
         if (result->calls.count == 0) {

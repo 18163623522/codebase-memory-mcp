@@ -21,6 +21,7 @@ static const CBMType *c_lookup_field_type(CLSPContext *ctx, const char *type_qn,
                                           const char *field_name, int depth);
 static const CBMRegisteredType *c_resolve_field_owner_type(CLSPContext *ctx, const char *type_qn);
 static void c_process_function(CLSPContext *ctx, TSNode func_node);
+static bool c_process_configured_test_body(CLSPContext *ctx, TSNode scope);
 static void c_process_namespace(CLSPContext *ctx, TSNode ns_node);
 static void c_process_class(CLSPContext *ctx, TSNode class_node);
 static void c_process_body_child(CLSPContext *ctx, TSNode child);
@@ -3957,6 +3958,26 @@ static bool c_is_compound_assignment_operator(const char *operator_token) {
             strcmp(operator_token, "|=") == 0 || strcmp(operator_token, "^=") == 0);
 }
 
+/* The additive owner APIs publish rows that outlive their input owner,
+ * definition and registry arenas. A registry entry may borrow a caller's QN,
+ * so copy the published strings at the common emission boundary. NULL-owner
+ * legacy calls retain their existing allocation and borrowing behavior. */
+static void c_publish_resolved_call(CLSPContext *ctx, CBMResolvedCall call) {
+    if (ctx->test_definition_owners) {
+        const char **strings[] = {&call.caller_qn, &call.callee_qn, &call.strategy, &call.reason};
+        for (size_t i = 0; i < sizeof(strings) / sizeof(strings[0]); i++) {
+            if (!*strings[i])
+                continue;
+            *strings[i] = cbm_arena_strdup(ctx->arena, *strings[i]);
+            if (!*strings[i]) {
+                ctx->test_owner_error = true;
+                return; /* No row containing a borrowed or failed string escapes. */
+            }
+        }
+    }
+    cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, call);
+}
+
 static void c_emit_resolved_call_orig_at(CLSPContext *ctx, const char *callee_qn, const char *orig,
                                          const char *strategy, float confidence, TSNode site) {
     if (!ctx->resolved_calls || !callee_qn || !ctx->enclosing_func_qn)
@@ -3978,7 +3999,7 @@ static void c_emit_resolved_call_orig_at(CLSPContext *ctx, const char *callee_qn
         rc.site_start_byte = ts_node_start_byte(site);
         rc.site_end_byte = ts_node_end_byte(site);
     }
-    cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, rc);
+    c_publish_resolved_call(ctx, rc);
 }
 
 static void c_emit_resolved_call_orig(CLSPContext *ctx, const char *callee_qn, const char *orig,
@@ -4014,7 +4035,7 @@ static void c_emit_resolved_reference_at(CLSPContext *ctx, const char *callee_qn
     resolved.site_start_byte = ts_node_start_byte(site);
     resolved.site_end_byte = ts_node_end_byte(site);
     resolved.source_origin = ctx->source_origin;
-    cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, resolved);
+    c_publish_resolved_call(ctx, resolved);
 }
 
 // FNV-1a over (caller, type, field) with 0xff separators; 0 is remapped to 1
@@ -4104,7 +4125,7 @@ static void c_publish_field_owner(CLSPContext *ctx, const char *type_qn, const c
     resolved.kind = CBM_RESOLVED_FIELD_REFERENCE;
     resolved.source_origin = ctx->source_origin;
     if (resolved.callee_qn)
-        cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, resolved);
+        c_publish_resolved_call(ctx, resolved);
 }
 
 /* ── Designated initializers ─────────────────────────────────────────
@@ -4276,7 +4297,7 @@ static void c_emit_unresolved_call(CLSPContext *ctx, const char *expr_text, cons
     rc.confidence = 0.0f;
     rc.reason = reason;
     rc.source_origin = ctx->source_origin;
-    cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, rc);
+    c_publish_resolved_call(ctx, rc);
 }
 
 // ============================================================================
@@ -4304,6 +4325,18 @@ static void c_resolve_calls_in_node_inner(CLSPContext *ctx, TSNode node) {
     if (ts_node_is_null(node))
         return;
     const char *kind = ts_node_type(node);
+
+    if (ctx->test_definition_owners && ctx->test_definition_owners->has_test_definition_owners &&
+        ctx->test_definition_owners->test_owner_language == CBM_LANG_C) {
+        if (c_process_configured_test_body(ctx, node))
+            return;
+        /* Nested native functions are independent owners even when they occur
+         * inside the raw body of a configured C definition. */
+        if (strcmp(kind, "function_definition") == 0) {
+            c_process_function(ctx, node);
+            return;
+        }
+    }
 
     // Process statements for scope building
     c_process_statement(ctx, node);
@@ -5164,7 +5197,62 @@ recurse:;
 // Process function: set enclosing QN, bind params, walk body
 // ============================================================================
 
+/* The source digest and RAW origin have already been checked by the entry
+ * point, which reparses the source. The shared candidate then proves exact
+ * name/body spans against an owner row in that fresh tree. Macro arguments are
+ * not native function parameters: enter the proved body directly. */
+static bool c_process_configured_test_body(CLSPContext *ctx, TSNode scope) {
+    if (!ctx->test_definition_owners ||
+        ctx->test_definition_owners->test_owner_language != CBM_LANG_C)
+        return false;
+    const char *kind = ts_node_type(scope);
+    if (strcmp(kind, "function_definition") != 0 && strcmp(kind, "compound_statement") != 0)
+        return false;
+    const char *qn = cbm_test_definition_owner_qn(ctx->test_definition_owners, scope);
+    if (!qn)
+        return false;
+    TSNode name, body;
+    if (!cbm_test_definition_candidate(scope, ctx->test_definition_owners->test_owner_language,
+                                       &name, &body) ||
+        ts_node_is_null(body)) {
+        ctx->test_owner_error = true;
+        return true;
+    }
+    ctx->test_owner_seen_count++;
+    if (ctx->arena != &ctx->test_definition_owners->arena) {
+        qn = cbm_arena_strdup(ctx->arena, qn);
+        if (!qn) {
+            ctx->test_owner_error = true;
+            return true;
+        }
+    }
+    const char *saved_func = ctx->enclosing_func_qn;
+    CBMScope *saved_scope = ctx->current_scope;
+    int saved_fp_count = ctx->fp_count;
+    ctx->enclosing_func_qn = qn;
+    ctx->current_scope = cbm_scope_push(ctx->arena, saved_scope);
+    if (!ctx->current_scope) {
+        ctx->test_owner_error = true;
+    } else {
+        /* The compound node itself may be the owner scope. Walk its children
+         * once so entering it cannot recursively re-enter the same owner. */
+        TSTreeCursor cursor = ts_tree_cursor_new(body);
+        if (ts_tree_cursor_goto_first_child(&cursor)) {
+            do {
+                c_resolve_calls_in_node(ctx, ts_tree_cursor_current_node(&cursor));
+            } while (ts_tree_cursor_goto_next_sibling(&cursor));
+        }
+        ts_tree_cursor_delete(&cursor);
+    }
+    ctx->fp_count = saved_fp_count;
+    ctx->current_scope = saved_scope;
+    ctx->enclosing_func_qn = saved_func;
+    return true;
+}
+
 static void c_process_function(CLSPContext *ctx, TSNode func_node) {
+    if (c_process_configured_test_body(ctx, func_node))
+        return;
     TSNode decl = ts_node_child_by_field_name(func_node, "declarator", 10);
     if (ts_node_is_null(decl))
         return;
@@ -5235,43 +5323,57 @@ static void c_process_function(CLSPContext *ctx, TSNode func_node) {
     if (!func_name || !func_name[0])
         return;
 
-    // Build enclosing function QN
-    const char *func_qn = c_build_qn(ctx, func_name);
-    // For a method defined INLINE inside its class body, func_name is a bare
-    // identifier ("compute") and enclosing_class_qn was inherited from
-    // c_process_class (saved_class_qn == enclosing_class_qn). The textual
-    // extractor and the registry qualify the method as module.Class.method, so
-    // building func_qn as module.method here (no class) made the LSP-resolved
-    // call's caller_qn disagree with the textual call's enclosing_func_qn and
-    // cbm_pipeline_find_lsp_resolution never joined them — every in-method call
-    // (e.g. lsp_implicit_this) silently lost its type-aware strategy. Prepend
-    // the enclosing class, mirroring the Go receiver-QN fix. Out-of-line
-    // definitions (Widget::compute) already carry the class in func_name (a
-    // qualified_identifier), so c_build_qn produces module.Class.method and the
-    // enclosing_class_qn was set HERE (saved_class_qn != enclosing_class_qn);
-    // skip those, and skip names that already contain the class scope.
-    if (ctx->enclosing_class_qn && saved_class_qn == ctx->enclosing_class_qn &&
-        !strchr(func_qn, '.')) {
-        func_qn = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->enclosing_class_qn, func_qn);
-    } else if (ctx->enclosing_class_qn && saved_class_qn != ctx->enclosing_class_qn &&
-               strchr(func_qn, '.')) {
-        /* Out-of-line method `Class::method`: c_build_qn yields the bare
-         * "Class.method" (no module) — the class scope was resolved HERE to the
-         * full module-qualified class QN (saved_class_qn != enclosing_class_qn).
-         * Rebuild as <class QN>.<method short name> so the caller_qn matches the
-         * def walk and call-scope QN, which qualify out-of-line methods the same
-         * way. Without this the caller_qn stays "Class.method", the exact-equality
-         * lsp_resolve join misses, and the LSP rescue is discarded (gap #5a). */
-        const char *dot = strrchr(func_qn, '.');
-        func_qn = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->enclosing_class_qn, dot + 1);
-    } else if (!strchr(func_qn, '.')) {
-        /* A free function in a namespace is qualified by the namespace scope
-         * (current_namespace is module_qn.ns), matching the def QN the extractor
-         * now produces; outside any namespace this falls back to the file module
-         * so non-namespaced free functions are unchanged. */
-        const char *scope = ctx->current_namespace ? ctx->current_namespace : ctx->module_qn;
-        if (scope) {
-            func_qn = cbm_arena_sprintf(ctx->arena, "%s.%s", scope, func_qn);
+    const char *func_qn = cbm_test_definition_owner_qn(ctx->test_definition_owners, func_node);
+    if (func_qn) {
+        ctx->test_owner_seen_count++;
+        if (ctx->arena != &ctx->test_definition_owners->arena) {
+            func_qn = cbm_arena_strdup(ctx->arena, func_qn);
+            if (!func_qn) {
+                ctx->test_owner_error = true;
+                ctx->enclosing_class_qn = saved_class_qn;
+                return;
+            }
+        }
+    }
+    if (!func_qn) {
+        // Build enclosing function QN
+        func_qn = c_build_qn(ctx, func_name);
+        // For a method defined INLINE inside its class body, func_name is a bare
+        // identifier ("compute") and enclosing_class_qn was inherited from
+        // c_process_class (saved_class_qn == enclosing_class_qn). The textual
+        // extractor and the registry qualify the method as module.Class.method, so
+        // building func_qn as module.method here (no class) made the LSP-resolved
+        // call's caller_qn disagree with the textual call's enclosing_func_qn and
+        // cbm_pipeline_find_lsp_resolution never joined them — every in-method call
+        // (e.g. lsp_implicit_this) silently lost its type-aware strategy. Prepend
+        // the enclosing class, mirroring the Go receiver-QN fix. Out-of-line
+        // definitions (Widget::compute) already carry the class in func_name (a
+        // qualified_identifier), so c_build_qn produces module.Class.method and the
+        // enclosing_class_qn was set HERE (saved_class_qn != enclosing_class_qn);
+        // skip those, and skip names that already contain the class scope.
+        if (ctx->enclosing_class_qn && saved_class_qn == ctx->enclosing_class_qn &&
+            !strchr(func_qn, '.')) {
+            func_qn = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->enclosing_class_qn, func_qn);
+        } else if (ctx->enclosing_class_qn && saved_class_qn != ctx->enclosing_class_qn &&
+                   strchr(func_qn, '.')) {
+            /* Out-of-line method `Class::method`: c_build_qn yields the bare
+             * "Class.method" (no module) — the class scope was resolved HERE to the
+             * full module-qualified class QN (saved_class_qn != enclosing_class_qn).
+             * Rebuild as <class QN>.<method short name> so the caller_qn matches the
+             * def walk and call-scope QN, which qualify out-of-line methods the same
+             * way. Without this the caller_qn stays "Class.method", the exact-equality
+             * lsp_resolve join misses, and the LSP rescue is discarded (gap #5a). */
+            const char *dot = strrchr(func_qn, '.');
+            func_qn = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->enclosing_class_qn, dot + 1);
+        } else if (!strchr(func_qn, '.')) {
+            /* A free function in a namespace is qualified by the namespace scope
+             * (current_namespace is module_qn.ns), matching the def QN the extractor
+             * now produces; outside any namespace this falls back to the file module
+             * so non-namespaced free functions are unchanged. */
+            const char *scope = ctx->current_namespace ? ctx->current_namespace : ctx->module_qn;
+            if (scope) {
+                func_qn = cbm_arena_sprintf(ctx->arena, "%s.%s", scope, func_qn);
+            }
         }
     }
     ctx->enclosing_func_qn = func_qn;
@@ -5368,6 +5470,8 @@ static void c_process_body_child(CLSPContext *ctx, TSNode child) {
         return;
     const char *ck = ts_node_type(child);
 
+    if (c_process_configured_test_body(ctx, child))
+        return;
     if (strcmp(ck, "function_definition") == 0) {
         c_process_function(ctx, child);
     } else if (strcmp(ck, "namespace_definition") == 0) {
@@ -6165,8 +6269,50 @@ static void c_rewrite_proved_destructor_candidates(CBMFileResult *result) {
     }
 }
 
+/* Every configured owner must have been visited in this exact raw tree.
+ * A stale/mismatched cached tree cannot quietly fall back to bare macro QNs. */
+static bool c_test_owners_complete(const CLSPContext *ctx) {
+    if (ctx->test_owner_error) return false;
+    if (!ctx->test_definition_owners ||
+        !ctx->test_definition_owners->has_test_definition_owners) return true;
+    int expected = 0;
+    for (int i = 0; i < ctx->test_definition_owners->defs.count; i++)
+        if (ctx->test_definition_owners->defs.items[i].test_role != CBM_TEST_ROLE_NONE) expected++;
+    return expected == ctx->test_owner_seen_count;
+}
+
 void cbm_run_c_lsp(CBMArena *arena, CBMFileResult *result, const char *source, int source_len,
                    TSNode root, bool cpp_mode, CBMSourceOrigin source_origin) {
+    (void)cbm_run_c_lsp_with_test_owners(arena, result, source, source_len, root,
+                                       cpp_mode, source_origin, NULL);
+}
+
+bool cbm_run_c_lsp_with_test_owners(
+    CBMArena *arena, CBMFileResult *result, const char *source, int source_len,
+    TSNode root, bool cpp_mode, CBMSourceOrigin source_origin,
+    const CBMFileResult *test_owners) {
+    if ((test_owners && test_owners->has_test_definition_owners &&
+         source_origin != CBM_SOURCE_ORIGIN_RAW) ||
+        !cbm_test_definition_owners_match(test_owners, source, source_len, cpp_mode,
+                                          result->module_qn)) return false;
+
+    /* TSNode carries no authenticated source-byte provenance. For configured
+     * owners, parse the verified buffer here rather than trusting a supplied
+     * root whose numeric spans could coincide with a different expression. */
+    TSTree *owner_tree = NULL;
+    if (test_owners && test_owners->has_test_definition_owners) {
+        TSParser *parser = ts_parser_new();
+        if (!parser) return false;
+        const TSLanguage *ts_lang = cpp_mode ? tree_sitter_cpp() : tree_sitter_c();
+        if (!ts_parser_set_language(parser, ts_lang)) {
+            ts_parser_delete(parser);
+            return false;
+        }
+        owner_tree = ts_parser_parse_string(parser, NULL, source, (uint32_t)source_len);
+        ts_parser_delete(parser);
+        if (!owner_tree) return false;
+        root = ts_tree_root_node(owner_tree);
+    }
 
     CBMTypeRegistry reg;
     cbm_registry_init(&reg, arena);
@@ -6309,9 +6455,13 @@ void cbm_run_c_lsp(CBMArena *arena, CBMFileResult *result, const char *source, i
     CLSPContext ctx;
     c_lsp_init(&ctx, arena, source, source_len, &reg, module_qn, cpp_mode, &result->resolved_calls);
     ctx.source_origin = source_origin;
+    ctx.test_definition_owners = test_owners;
 
     c_lsp_process_file(&ctx, root);
     c_rewrite_proved_destructor_candidates(result);
+    bool owners_complete = c_test_owners_complete(&ctx);
+    if (owner_tree) ts_tree_delete(owner_tree);
+    return owners_complete;
 }
 
 // ============================================================================
@@ -6489,28 +6639,48 @@ void cbm_run_c_lsp_cross_with_registry(CBMArena *arena, const char *source, int 
                                        const char **include_paths, const char **include_ns_qns,
                                        int include_count, TSTree *cached_tree,
                                        CBMResolvedCallArray *out) {
+    (void)cbm_run_c_lsp_cross_with_registry_with_test_owners(
+        arena, source, source_len, module_qn, cpp_mode, reg, include_paths,
+        include_ns_qns, include_count, cached_tree, out, CBM_SOURCE_ORIGIN_RAW, NULL);
+}
+
+bool cbm_run_c_lsp_cross_with_registry_with_test_owners(CBMArena *arena, const char *source, int source_len,
+                                       const char *module_qn, bool cpp_mode, CBMTypeRegistry *reg,
+                                       const char **include_paths, const char **include_ns_qns,
+                                       int include_count, TSTree *cached_tree,
+                                       CBMResolvedCallArray *out, CBMSourceOrigin source_origin,
+                                       const CBMFileResult *test_owners) {
+    if ((test_owners && test_owners->has_test_definition_owners &&
+         source_origin != CBM_SOURCE_ORIGIN_RAW) ||
+        !cbm_test_definition_owners_match(test_owners, source, source_len, cpp_mode,
+                                          module_qn)) return false;
+
     if (!source || source_len == 0 || !out || !reg)
-        return;
+        return false;
 
     TSParser *parser = NULL;
-    TSTree *tree = cached_tree;
+    /* No source provenance is carried by cached_tree. Preserve the legacy
+     * cache fast path only when no configured owner proof is being used. */
+    TSTree *tree = test_owners && test_owners->has_test_definition_owners ? NULL : cached_tree;
     bool owns_tree = false;
     if (!tree) {
         parser = ts_parser_new();
         if (!parser)
-            return;
+            return false;
         const TSLanguage *ts_lang = cpp_mode ? tree_sitter_cpp() : tree_sitter_c();
         ts_parser_set_language(parser, ts_lang);
         tree = ts_parser_parse_string(parser, NULL, source, source_len);
         ts_parser_delete(parser);
         owns_tree = true;
         if (!tree)
-            return;
+            return false;
     }
     TSNode root = ts_tree_root_node(tree);
 
     CLSPContext ctx;
     c_lsp_init(&ctx, arena, source, source_len, reg, module_qn, cpp_mode, out);
+    ctx.source_origin = source_origin;
+    ctx.test_definition_owners = test_owners;
     ctx.registry_shared = true; /* Tier-2 shared registry: read-only, see flag doc */
     for (int i = 0; i < include_count; i++) {
         c_lsp_add_include(&ctx, include_paths[i], include_ns_qns[i]);
@@ -6520,15 +6690,31 @@ void cbm_run_c_lsp_cross_with_registry(CBMArena *arena, const char *source, int 
     if (owns_tree) {
         ts_tree_delete(tree);
     }
+    return c_test_owners_complete(&ctx);
 }
 
 void cbm_run_c_lsp_cross(CBMArena *arena, const char *source, int source_len, const char *module_qn,
                          bool cpp_mode, CBMLSPDef *defs, int def_count, const char **include_paths,
                          const char **include_ns_qns, int include_count, TSTree *cached_tree,
                          CBMResolvedCallArray *out) {
+    (void)cbm_run_c_lsp_cross_with_test_owners(
+        arena, source, source_len, module_qn, cpp_mode, defs, def_count, include_paths,
+        include_ns_qns, include_count, cached_tree, out, CBM_SOURCE_ORIGIN_RAW, NULL);
+}
+
+bool cbm_run_c_lsp_cross_with_test_owners(CBMArena *arena, const char *source, int source_len, const char *module_qn,
+                         bool cpp_mode, CBMLSPDef *defs, int def_count, const char **include_paths,
+                         const char **include_ns_qns, int include_count, TSTree *cached_tree,
+                         CBMResolvedCallArray *out, CBMSourceOrigin source_origin,
+                                       const CBMFileResult *test_owners) {
+    if ((test_owners && test_owners->has_test_definition_owners &&
+         source_origin != CBM_SOURCE_ORIGIN_RAW) ||
+        !cbm_test_definition_owners_match(test_owners, source, source_len, cpp_mode,
+                                          module_qn)) return false;
+
 
     if (!source || source_len == 0 || !out)
-        return;
+        return false;
 
     CBMTypeRegistry reg;
     cbm_registry_init(&reg, arena);
@@ -6543,19 +6729,21 @@ void cbm_run_c_lsp_cross(CBMArena *arena, const char *source, int source_len, co
 
     // Use cached tree if available, otherwise parse fresh
     TSParser *parser = NULL;
-    TSTree *tree = cached_tree;
+    /* No source provenance is carried by cached_tree. Preserve the legacy
+     * cache fast path only when no configured owner proof is being used. */
+    TSTree *tree = test_owners && test_owners->has_test_definition_owners ? NULL : cached_tree;
     bool owns_tree = false;
     if (!tree) {
         parser = ts_parser_new();
         if (!parser)
-            return;
+            return false;
         const TSLanguage *ts_lang = cpp_mode ? tree_sitter_cpp() : tree_sitter_c();
         ts_parser_set_language(parser, ts_lang);
         tree = ts_parser_parse_string(parser, NULL, source, source_len);
         ts_parser_delete(parser);
         owns_tree = true;
         if (!tree)
-            return;
+            return false;
     }
 
     TSNode root = ts_tree_root_node(tree);
@@ -6568,6 +6756,8 @@ void cbm_run_c_lsp_cross(CBMArena *arena, const char *source, int source_len, co
     // Initialize context and run
     CLSPContext ctx;
     c_lsp_init(&ctx, arena, source, source_len, &reg, module_qn, cpp_mode, out);
+    ctx.source_origin = source_origin;
+    ctx.test_definition_owners = test_owners;
 
     // Add include mappings
     for (int i = 0; i < include_count; i++) {
@@ -6579,6 +6769,7 @@ void cbm_run_c_lsp_cross(CBMArena *arena, const char *source, int source_len, co
     if (owns_tree) {
         ts_tree_delete(tree);
     }
+    return c_test_owners_complete(&ctx);
 }
 
 // --- Batch cross-file LSP ---

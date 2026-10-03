@@ -82,6 +82,9 @@ typedef struct {
     // Output
     CBMResolvedCallArray *resolved_calls;
     CBMSourceOrigin source_origin; // source buffer represented by emitted occurrence spans
+    const CBMFileResult *test_definition_owners; /* borrowed, prevalidated raw source identity */
+    int test_owner_seen_count;
+    bool test_owner_error;
 
     // Function pointer targets: lexical binding -> exact target function QN.
     // A NULL target is an explicitly unknown/ambiguous binding and must shadow
@@ -169,6 +172,31 @@ void cbm_run_c_lsp_cross_with_registry(CBMArena *arena, const char *source, int 
                                        int include_count,
                                        TSTree *cached_tree, // NULL = parse internally
                                        CBMResolvedCallArray *out);
+
+/* Additive configured-owner entrypoints. Owners must outlive the call. With
+ * owners, RAW origin, exact source identity and module identity are required.
+ * Configured owners fresh-parse verified source: supplied roots/cached trees
+ * have no source provenance and are not trusted. NULL owners retain caching.
+ * False leaves output untouched when identity validation fails. A later
+ * mapping/OOM failure may leave partial output that callers must discard. QNs
+ * in successful output belong to the supplied output arena. Callers must
+ * abort publication on false. Legacy wrappers pass NULL and retain previous behavior. */
+bool cbm_run_c_lsp_with_test_owners(
+    CBMArena *arena, CBMFileResult *result, const char *source, int source_len,
+    TSNode root, bool cpp_mode, CBMSourceOrigin source_origin,
+    const CBMFileResult *test_owners);
+bool cbm_run_c_lsp_cross_with_test_owners(
+    CBMArena *arena, const char *source, int source_len, const char *module_qn,
+    bool cpp_mode, CBMLSPDef *defs, int def_count, const char **include_paths,
+    const char **include_ns_qns, int include_count, TSTree *cached_tree,
+    CBMResolvedCallArray *out, CBMSourceOrigin source_origin,
+    const CBMFileResult *test_owners);
+bool cbm_run_c_lsp_cross_with_registry_with_test_owners(
+    CBMArena *arena, const char *source, int source_len, const char *module_qn,
+    bool cpp_mode, CBMTypeRegistry *reg, const char **include_paths,
+    const char **include_ns_qns, int include_count, TSTree *cached_tree,
+    CBMResolvedCallArray *out, CBMSourceOrigin source_origin,
+    const CBMFileResult *test_owners);
 
 // Register C stdlib types and functions into a registry.
 void cbm_c_stdlib_register(CBMTypeRegistry *reg, CBMArena *arena);
