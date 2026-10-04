@@ -903,7 +903,7 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call, const CBM
         if (cbm_service_pattern_route_method(call->callee_name) != NULL && call->first_string_arg &&
             call->first_string_arg[0] == '/') {
             handle_route_registration(ctx, call, source_node, module_qn, imp_keys, imp_vals,
-                                      imp_count);
+                                      imp_count, route_mount);
             return SKIP_ONE;
         }
         return 0;

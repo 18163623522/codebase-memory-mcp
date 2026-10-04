@@ -12093,7 +12093,7 @@ static char *resolve_path_owner(const char *path, char *derived) {
     cbm_dirent_t *entry;
     while ((entry = cbm_readdir(d)) != NULL) {
         mcp_project_record_t record = {0};
-        if (!is_project_db_file(entry->name, strlen(entry->name)) ||
+        if (!cbm_is_project_index_db(entry->name) ||
             read_project_record_identity(dir_path, entry->name, 0, &record) != PROJECT_RECORD_OK) {
             continue;
         }
