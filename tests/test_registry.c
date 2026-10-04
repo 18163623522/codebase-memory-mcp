@@ -6,6 +6,7 @@
  */
 #include "test_framework.h"
 #include "pipeline/pipeline.h"
+#include "pipeline/pipeline_internal.h" /* cbm_python_import_binding_contradicts (#2127) */
 
 #include <stdlib.h>
 #include <string.h>
@@ -320,6 +321,56 @@ TEST(resolve_qualified_ambiguous_tail_falls_through) {
     cbm_resolution_t res =
         cbm_registry_resolve(r, "Foo::Bar::run", "proj.svcA.Caller", NULL, NULL, 0);
     ASSERT_TRUE(!res.strategy || strcmp(res.strategy, "qualified_suffix") != 0);
+
+    cbm_registry_free(r);
+    PASS();
+}
+
+/* cbm_registry_add used to discard its `name` argument and re-derive the
+ * lookup key from the QN's last dot segment. That made the QN's tail load
+ * bearing for the bare-name index every language shares: a Rust cfg twin,
+ * minted as "add#cfg(test)", was indexed under that literal string and no bare
+ * `add` callee could ever reach it. */
+TEST(registry_indexes_by_passed_name_not_qn_tail) {
+    cbm_registry_t *r = cbm_registry_new();
+    cbm_registry_add(r, "add", "proj.lib.add#cfg(test)", "Function");
+
+    cbm_resolution_t res = cbm_registry_resolve(r, "add", "proj.lib.caller", NULL, NULL, 0);
+    ASSERT_STR_EQ(res.qualified_name, "proj.lib.add#cfg(test)");
+
+    cbm_registry_free(r);
+    PASS();
+}
+
+/* The derived key stays unconditional, and this pins that.
+ *
+ * A name may carry segments the QN's tail drops, and then the tail is the key
+ * callers actually spell. An HCL block is named "resource.aws_instance.web" by
+ * find_hcl_block_name while its QN tail is bare "web", which is how an
+ * `aws_instance.web.id` reference reaches it. Re-keying the index on the passed
+ * name would lose that lookup outright, so the fence gate above leaves these
+ * shapes exactly as they were.
+ *
+ * The Module row registers a shape production cannot produce: every caller of
+ * cbm_registry_add gates on cbm_label_is_registry_symbol, which does not admit
+ * "Module". It is here because the registry's own contract is per-label-string,
+ * not per-caller, and a future label change should not silently drop the stem
+ * lookup a bare module reference needs. */
+TEST(registry_indexes_a_dotted_name_under_its_tail_too) {
+    cbm_registry_t *r = cbm_registry_new();
+    cbm_registry_add(r, "resource.aws_instance.web", "proj.main.resource.aws_instance.web",
+                     "Class");
+    cbm_registry_add(r, "helper.py", "proj.pkg.helper", "Module");
+
+    cbm_resolution_t tail = cbm_registry_resolve(r, "web", "proj.main", NULL, NULL, 0);
+    ASSERT_STR_EQ(tail.qualified_name, "proj.main.resource.aws_instance.web");
+
+    cbm_resolution_t whole =
+        cbm_registry_resolve(r, "resource.aws_instance.web", "proj.main", NULL, NULL, 0);
+    ASSERT_STR_EQ(whole.qualified_name, "proj.main.resource.aws_instance.web");
+
+    cbm_resolution_t stem = cbm_registry_resolve(r, "helper", "proj.pkg.caller", NULL, NULL, 0);
+    ASSERT_STR_EQ(stem.qualified_name, "proj.pkg.helper");
 
     cbm_registry_free(r);
     PASS();
@@ -1113,6 +1164,72 @@ TEST(local_binding_suppress_keeps_unshadowed_and_strong_strategies) {
     PASS();
 }
 
+/* #2127: the import-binding guard drops only weak strategies, and only when the
+ * caller established that the file's import contradicts the target. */
+TEST(import_binding_suppress_drops_only_weak_contradicted_calls) {
+    ASSERT_TRUE(cbm_suppress_weak_import_bound_call(true, true, "unique_name"));
+    ASSERT_TRUE(cbm_suppress_weak_import_bound_call(true, true, "suffix_match"));
+    ASSERT_TRUE(cbm_suppress_weak_import_bound_call(true, true, "fuzzy"));
+    ASSERT_FALSE(cbm_suppress_weak_import_bound_call(true, false, "unique_name"));
+    ASSERT_FALSE(cbm_suppress_weak_import_bound_call(false, true, "unique_name"));
+    ASSERT_FALSE(cbm_suppress_weak_import_bound_call(true, true, "import_map"));
+    ASSERT_FALSE(cbm_suppress_weak_import_bound_call(true, true, "same_module"));
+    ASSERT_FALSE(cbm_suppress_weak_import_bound_call(true, true, "lsp_py_method"));
+    ASSERT_FALSE(cbm_suppress_weak_import_bound_call(true, true, NULL));
+    PASS();
+}
+
+/* #2127: when does a Python import binding contradict a resolved target? */
+TEST(python_import_binding_contradicts_only_foreign_chains) {
+    CBMImport items[] = {
+        {.local_name = "patch", .module_path = "unittest.mock.patch"},
+        {.local_name = "f", .module_path = "pkg.f"},
+        {.local_name = "app", .module_path = "app.util"},
+        {.local_name = "h", .module_path = "app.util.helper"},
+        {.local_name = "rel", .module_path = ".views.rel"},
+        {.local_name = "mock", .module_path = "unittest.mock"},
+        {.local_name = "Author", .module_path = ".models.Author"},
+        {.local_name = "copy", .module_path = "copy.copy"},
+    };
+    CBMImportArray imps = {.items = items, .count = 8, .cap = 8};
+    /* `from copy import copy` is a from-import (leaf == local), not a root
+     * package import: its chain `copy` must appear in the target. */
+    ASSERT_TRUE(cbm_python_import_binding_contradicts(
+        &imps, "copy", "proj.forms.utils.ErrorList.copy", NULL, NULL, NULL));
+    /* Member call through an external module import: foreign → dropped. */
+    ASSERT_TRUE(cbm_python_import_binding_contradicts(
+        &imps, "mock.patch", "proj.views.generic.RedirectView.patch", NULL, NULL, NULL));
+    /* Member reached THROUGH an imported class may live on any type: only the
+     * import's own chain (`models`) is compared, so the manager call stays. */
+    ASSERT_FALSE(cbm_python_import_binding_contradicts(
+        &imps, "Author.objects.create", "proj.db.models.query.QuerySet.create", NULL, NULL, NULL));
+    /* The report: external mock.patch must not be a project REST handler. */
+    ASSERT_TRUE(cbm_python_import_binding_contradicts(
+        &imps, "patch", "proj.app.views.PkgConfigView.patch", NULL, NULL, NULL));
+    /* Re-export / src layout: the chain `pkg` is present → keep. */
+    ASSERT_FALSE(
+        cbm_python_import_binding_contradicts(&imps, "f", "proj.src.pkg.core.f", NULL, NULL, NULL));
+    /* `import app.util` binds the root package; the callee spells its path. */
+    ASSERT_FALSE(cbm_python_import_binding_contradicts(&imps, "app.util.helper",
+                                                       "proj.app.util.helper", NULL, NULL, NULL));
+    /* Aliased from-import: consistent target kept, foreign target dropped. */
+    ASSERT_FALSE(cbm_python_import_binding_contradicts(&imps, "h", "proj.app.util.helper", NULL,
+                                                       NULL, NULL));
+    ASSERT_TRUE(
+        cbm_python_import_binding_contradicts(&imps, "h", "proj.other.helper", NULL, NULL, NULL));
+    /* Relative import: leading dots carry no segment; `views` must appear. */
+    ASSERT_FALSE(cbm_python_import_binding_contradicts(&imps, "rel", "proj.app.views.rel", NULL,
+                                                       NULL, NULL));
+    ASSERT_TRUE(cbm_python_import_binding_contradicts(&imps, "rel", "proj.app.models.rel", NULL,
+                                                      NULL, NULL));
+    /* Not import-bound → never a contradiction (the recall pin). */
+    ASSERT_FALSE(
+        cbm_python_import_binding_contradicts(&imps, "helper", "proj.x.helper", NULL, NULL, NULL));
+    ASSERT_FALSE(
+        cbm_python_import_binding_contradicts(NULL, "patch", "proj.x.patch", NULL, NULL, NULL));
+    PASS();
+}
+
 TEST(weak_call_guards_share_one_drop_list) {
     /* The member guard and the local-binding guard must agree on what "weak"
      * means. They share a single static predicate for exactly this reason; if
@@ -1201,6 +1318,8 @@ SUITE(registry) {
     RUN_TEST(resolve_same_module);
     RUN_TEST(resolve_qualified_disambiguates_same_name);
     RUN_TEST(resolve_qualified_ambiguous_tail_falls_through);
+    RUN_TEST(registry_indexes_by_passed_name_not_qn_tail);
+    RUN_TEST(registry_indexes_a_dotted_name_under_its_tail_too);
     RUN_TEST(resolve_import_map);
     RUN_TEST(resolve_import_map_bare_function);
     RUN_TEST(resolve_import_map_bare_alias);
@@ -1250,5 +1369,7 @@ SUITE(registry) {
     RUN_TEST(weak_member_unique_name_exempt_is_python_self_rooted_unique_and_specific_only);
     RUN_TEST(local_binding_suppress_drops_weak_shadowed_bare_calls);
     RUN_TEST(local_binding_suppress_keeps_unshadowed_and_strong_strategies);
+    RUN_TEST(import_binding_suppress_drops_only_weak_contradicted_calls);
+    RUN_TEST(python_import_binding_contradicts_only_foreign_chains);
     RUN_TEST(weak_call_guards_share_one_drop_list);
 }

@@ -193,6 +193,13 @@ struct cbm_pipeline {
     cbm_index_resource_policy_t resource_policy;
     cbm_index_resource_violation_t resource_violation;
 
+    /* Snapshot of the artifact export failure of THIS run (set only by
+     * export_after_publish failure, zeroed at run start, cleared on success).
+     * The MCP layer reads it to attribute a failed run to artifact export
+     * without consulting cbm_artifact_export_last_error() directly — that
+     * global can still hold a PREVIOUS run's error. */
+    char export_error[CBM_SZ_1K];
+
     /* Indexing state (set during run) */
     cbm_gbuf_t *gbuf;
     cbm_registry_t *registry;
@@ -387,6 +394,10 @@ void cbm_pipeline_get_resource_violation(const cbm_pipeline_t *p,
     if (violation) {
         *violation = p ? p->resource_violation : (cbm_index_resource_violation_t){0};
     }
+}
+
+const char *cbm_pipeline_export_error(const cbm_pipeline_t *p) {
+    return p ? p->export_error : "";
 }
 
 bool cbm_pipeline_set_project_name(cbm_pipeline_t *p, const char *name) {
@@ -1145,7 +1156,8 @@ static void log_result_census(const char *tag, CBMFileResult **cache, int file_c
                      (size_t)r->string_refs.count * sizeof(CBMStringRef) +
                      (size_t)r->impl_traits.count * sizeof(CBMImplTrait) +
                      (size_t)r->infra_bindings.count * sizeof(CBMInfraBinding) +
-                     (size_t)r->channels.count * sizeof(CBMChannel);
+                     (size_t)r->channels.count * sizeof(CBMChannel) +
+                     (size_t)r->field_types.count * sizeof(CBMFieldType);
         cap_other += (size_t)r->imports.cap * sizeof(CBMImport) +
                      (size_t)r->resolved_calls.cap * sizeof(CBMResolvedCall) +
                      (size_t)r->throws.cap * sizeof(CBMThrow) +
@@ -1154,7 +1166,8 @@ static void log_result_census(const char *tag, CBMFileResult **cache, int file_c
                      (size_t)r->string_refs.cap * sizeof(CBMStringRef) +
                      (size_t)r->impl_traits.cap * sizeof(CBMImplTrait) +
                      (size_t)r->infra_bindings.cap * sizeof(CBMInfraBinding) +
-                     (size_t)r->channels.cap * sizeof(CBMChannel);
+                     (size_t)r->channels.cap * sizeof(CBMChannel) +
+                     (size_t)r->field_types.cap * sizeof(CBMFieldType);
         n_defs += (size_t)r->defs.count;
         n_calls += (size_t)r->calls.count;
         n_usages += (size_t)r->usages.count;
@@ -1183,7 +1196,7 @@ static void log_result_census(const char *tag, CBMFileResult **cache, int file_c
             }
             str_def_fp += def->fingerprint ? (size_t)def->fingerprint_k * sizeof(uint32_t) : 0;
             str_def_misc += census_len(def->route_path) + census_len(def->route_method) +
-                            census_len(def->impl_trait);
+                            census_len(def->impl_trait) + census_len(def->http_base_url);
         }
         for (int c = 0; c < r->calls.count; c++) {
             const CBMCall *call = &r->calls.items[c];
@@ -2256,10 +2269,15 @@ int cbm_pipeline_publish_staged(char *stage_path, const cbm_pipeline_generation_
         free(stage_path);
         return CBM_PIPELINE_PERSIST_FAILED;
     }
-    bool ok = cbm_store_exec(store, "PRAGMA synchronous=FULL;") == CBM_STORE_OK;
-    ok = ok && cbm_store_delete_file_hashes(store, generation->project) == CBM_STORE_OK &&
-         cbm_store_upsert_file_hash_batch(store, generation->manifest,
-                                          generation->manifest_count) == CBM_STORE_OK;
+    /* No synchronous=FULL for these writes (#1419): the stage is private until
+     * the atomic rename and a crash discards it, so an fsync per WAL commit
+     * protects nothing here. The store's NORMAL level is SQLite's
+     * corruption-safe setting under WAL, and cbm_store_seal_for_atomic_publish()
+     * raises this connection to FULL for the checkpoint that makes the
+     * published file durable. */
+    bool ok = cbm_store_delete_file_hashes(store, generation->project) == CBM_STORE_OK &&
+              cbm_store_upsert_file_hash_batch(store, generation->manifest,
+                                               generation->manifest_count) == CBM_STORE_OK;
     /* LSP surfaces belong to the generation: written inside the same staging
      * store, before the atomic rename, so graph and surface data can never
      * publish separately. The delete guards the incremental path, whose
@@ -3162,6 +3180,12 @@ static int export_after_publish(cbm_pipeline_t *p, const char *final_path) {
         if (rc != 0) {
             const char *err = cbm_artifact_export_last_error();
             cbm_log_error("pipeline.err", "phase", "artifact_export", "err", err ? err : "unknown");
+            /* #1665: snapshot the error of THIS run so the MCP layer can
+             * attribute the failure truthfully, instead of re-reading the
+             * process-global export error (which may describe a previous run)
+             * and instead of the generic "Pipeline failed" hint that blames
+             * repo_path for a write-permission failure. */
+            (void)snprintf(p->export_error, sizeof(p->export_error), "%s", err ? err : "unknown");
         }
         return rc;
     }
@@ -3397,6 +3421,7 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
     if (!p) {
         return CBM_NOT_FOUND;
     }
+    p->export_error[0] = '\0';
     char *final_path = resolve_db_path(p);
     if (!final_path || !ensure_db_parent(final_path)) {
         free(final_path);
