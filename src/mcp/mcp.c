@@ -5368,12 +5368,9 @@ static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
     if (semantic_only && vcount == 0) {
         diagnostic_hint = "No semantic matches; use a moderate/full index or broader keywords.";
     } else if (!semantic_only && out.total == 0) {
-        if (name_pattern && label) {
-            diagnostic_hint = "No results; remove label or broaden name_pattern.";
-        } else if (name_pattern) {
-            diagnostic_hint = "No nodes match; check spelling or broaden the regex.";
-        } else if (label) {
-            diagnostic_hint = "No nodes have this label; inspect get_graph_schema.";
+        if (has_filters) {
+            diagnostic_hint =
+                "No results match the current filters; broaden or remove filters and retry.";
         }
     } else if (core_fields_requested) {
         diagnostic_hint = "Core qn/name/label/file/lines fields are already present.";

@@ -2562,6 +2562,187 @@ TEST(tool_search_graph_basic) {
 static cbm_mcp_server_t *setup_snippet_server(char *tmp_dir, size_t tmp_sz);
 static void cleanup_snippet_dir(const char *tmp_dir);
 
+/* A real Function/name match can disappear under any additional structural
+ * filter. The diagnostic must not turn that absence into a claim about the
+ * label or spelling. Exercise the same graph through both response encodings. */
+TEST(tool_search_graph_empty_hint_describes_combined_filters_issue1366) {
+    static const char filtered_hint[] =
+        "No results match the current filters; broaden or remove filters and retry.";
+    static const char core_hint[] = "Core qn/name/label/file/lines fields are already present.";
+    static const char semantic_hint[] =
+        "No semantic matches; use a moderate/full index or broader keywords.";
+    static const struct {
+        const char *filters;
+        int total;
+        const char *hint;
+        bool semantic_only;
+    } cases[] = {
+        {"\"label\":\"Function\",\"name_pattern\":\"^entry$\"", 1, NULL, false},
+        {"\"label\":\"Function\",\"name_pattern\":\"^entry$\","
+         "\"file_pattern\":\"src/*.c\",\"qn_pattern\":\"^hint1366[.]src[.]entry$\","
+         "\"relationship\":\"CALLS\",\"min_degree\":1,\"max_degree\":1",
+         1, NULL, false},
+        {"\"label\":\"Function\",\"file_pattern\":\"missing-file-sentinel/*\"", 0, filtered_hint,
+         false},
+        {"\"label\":\"Function\",\"name_pattern\":\"^entry$\","
+         "\"qn_pattern\":\"missing-qn-sentinel\"",
+         0, filtered_hint, false},
+        {"\"label\":\"Function\",\"name_pattern\":\"^entry$\","
+         "\"relationship\":\"IMPORTS\"",
+         0, filtered_hint, false},
+        {"\"label\":\"Function\",\"name_pattern\":\"^entry$\",\"min_degree\":2", 0, filtered_hint,
+         false},
+        {"\"label\":\"Function\",\"name_pattern\":\"^entry$\",\"max_degree\":0", 0, filtered_hint,
+         false},
+        {"\"label\":\"Function\",\"name_pattern\":\"^entry$\","
+         "\"exclude_entry_points\":true",
+         0, filtered_hint, false},
+        {"\"label\":\"Function\",\"name_pattern\":\"^entry$\","
+         "\"file_pattern\":\"missing-file-sentinel/*\","
+         "\"qn_pattern\":\"missing-qn-sentinel\"",
+         0, filtered_hint, false},
+        {"\"file_pattern\":\"missing-file-sentinel/*\"", 0, filtered_hint, false},
+        {"\"label\":\"Function\",\"name_pattern\":\"^entry$\",\"fields\":[\"name\",\"file\"]", 1,
+         core_hint, false},
+        {"\"semantic_query\":[\"hint1366-no-vectors\"]", 0, semantic_hint, true},
+    };
+    enum { CASE_COUNT = sizeof(cases) / sizeof(cases[0]), FORMAT_COUNT = 2 };
+    char *responses[FORMAT_COUNT][CASE_COUNT] = {{0}};
+    mcp_search_cache_t cache;
+    ASSERT_TRUE(mcp_search_cache_open(&cache, "cbm-search-hint1366"));
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_store_t *store = srv ? cbm_mcp_server_store(srv) : NULL;
+    bool seeded = store && cbm_store_upsert_project(store, "hint1366", cache.path) == CBM_STORE_OK;
+    if (seeded) {
+        cbm_mcp_server_set_project(srv, "hint1366");
+        cbm_node_t entry = {.project = "hint1366",
+                            .label = "Function",
+                            .name = "entry",
+                            .qualified_name = "hint1366.src.entry",
+                            .file_path = "src/entry.c",
+                            .start_line = 1,
+                            .end_line = 3};
+        cbm_node_t target = {.project = "hint1366",
+                             .label = "Method",
+                             .name = "target",
+                             .qualified_name = "hint1366.src.target",
+                             .file_path = "src/target.c",
+                             .start_line = 1,
+                             .end_line = 2};
+        int64_t entry_id = cbm_store_upsert_node(store, &entry);
+        int64_t target_id = cbm_store_upsert_node(store, &target);
+        cbm_edge_t call = {
+            .project = "hint1366", .source_id = entry_id, .target_id = target_id, .type = "CALLS"};
+        /* One outgoing CALLS edge and no incoming CALLS makes entry a real
+         * entry point for the search filter, independently of properties. */
+        seeded = entry_id > 0 && target_id > 0 && cbm_store_insert_edge(store, &call) > 0;
+    }
+    bool requests_fit = true;
+    if (seeded) {
+        for (int format = 0; format < FORMAT_COUNT; format++) {
+            for (int c = 0; c < CASE_COUNT; c++) {
+                char args[1024];
+                int written =
+                    snprintf(args, sizeof(args), "{\"project\":\"hint1366\",\"format\":\"%s\",%s}",
+                             format == 0 ? "tree" : "json", cases[c].filters);
+                bool fits = written > 0 && (size_t)written < sizeof(args);
+                requests_fit = requests_fit && fits;
+                if (fits) {
+                    responses[format][c] = cbm_mcp_handle_tool(srv, "search_graph", args);
+                }
+            }
+        }
+    }
+    if (srv) {
+        cbm_mcp_server_free(srv);
+    }
+    bool cleaned = mcp_search_cache_close(&cache);
+    /* Restore the caller's cache environment before any result assertion. */
+    ASSERT_TRUE(seeded);
+    ASSERT_TRUE(requests_fit);
+    ASSERT_TRUE(cleaned);
+
+    for (int format = 0; format < FORMAT_COUNT; format++) {
+        for (int c = 0; c < CASE_COUNT; c++) {
+            char *response = responses[format][c];
+            ASSERT_NOT_NULL(response);
+            yyjson_doc *outer = yyjson_read(response, strlen(response), 0);
+            ASSERT_NOT_NULL(outer);
+            yyjson_val *result = yyjson_doc_get_root(outer);
+            ASSERT_TRUE(yyjson_is_obj(result));
+            ASSERT_FALSE(yyjson_get_bool(yyjson_obj_get(result, "isError")));
+            yyjson_val *content = yyjson_obj_get(result, "content");
+            ASSERT_TRUE(yyjson_is_arr(content));
+            ASSERT_EQ(yyjson_arr_size(content), 1);
+            yyjson_val *item = yyjson_arr_get(content, 0);
+            ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(item, "type")), "text");
+            const char *inner = yyjson_get_str(yyjson_obj_get(item, "text"));
+            ASSERT_NOT_NULL(inner);
+            if (format == 1) {
+                yyjson_doc *doc = yyjson_read(inner, strlen(inner), 0);
+                ASSERT_NOT_NULL(doc);
+                yyjson_val *root = yyjson_doc_get_root(doc);
+                yyjson_val *total = yyjson_obj_get(root, "total");
+                yyjson_val *count = yyjson_obj_get(root, "count");
+                ASSERT_TRUE(yyjson_is_int(total));
+                ASSERT_TRUE(yyjson_is_int(count));
+                ASSERT_EQ(yyjson_get_int(total), cases[c].total);
+                ASSERT_EQ(yyjson_get_int(count), cases[c].total);
+                yyjson_val *groups = yyjson_obj_get(root, "groups");
+                ASSERT_TRUE(yyjson_is_arr(groups));
+                ASSERT_EQ(yyjson_arr_size(groups), cases[c].total);
+                if (cases[c].total == 1) {
+                    yyjson_val *group = yyjson_arr_get(groups, 0);
+                    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(group, "qn_prefix")),
+                                  "hint1366.src");
+                    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(group, "file")), "src/entry.c");
+                    yyjson_val *rows = yyjson_obj_get(group, "rows");
+                    ASSERT_TRUE(yyjson_is_arr(rows));
+                    ASSERT_EQ(yyjson_arr_size(rows), 1);
+                    yyjson_val *row = yyjson_arr_get(rows, 0);
+                    ASSERT_STR_EQ(yyjson_get_str(yyjson_arr_get(row, 0)), "entry");
+                    ASSERT_STR_EQ(yyjson_get_str(yyjson_arr_get(row, 1)), "Function");
+                }
+                if (cases[c].hint) {
+                    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(root, "hint")), cases[c].hint);
+                } else {
+                    ASSERT_NULL(yyjson_obj_get(root, "hint"));
+                }
+                yyjson_doc_free(doc);
+            } else {
+                ASSERT_NOT_NULL(strstr(inner, cases[c].total == 1 ? "total: 1\n" : "total: 0\n"));
+                ASSERT_NOT_NULL(
+                    strstr(inner, cases[c].total == 1 ? "returned: 1\n" : "returned: 0\n"));
+                if (cases[c].semantic_only) {
+                    ASSERT_NULL(strstr(inner, "results:"));
+                    ASSERT_NOT_NULL(strstr(inner, "semantic: 0"));
+                } else {
+                    ASSERT_NOT_NULL(
+                        strstr(inner, cases[c].total == 1 ? "results: 1" : "results: 0"));
+                }
+                if (cases[c].total == 1) {
+                    ASSERT_NOT_NULL(strstr(inner, "entry"));
+                    ASSERT_NOT_NULL(strstr(inner, "Function"));
+                    ASSERT_NOT_NULL(strstr(inner, "src/entry.c"));
+                }
+                if (cases[c].hint) {
+                    ASSERT_NOT_NULL(strstr(inner, cases[c].hint));
+                } else {
+                    ASSERT_NULL(strstr(inner, "hint:"));
+                }
+            }
+            ASSERT_NULL(strstr(inner, "No nodes have this label"));
+            ASSERT_NULL(strstr(inner, "check spelling"));
+            ASSERT_NULL(strstr(inner, "broaden name_pattern"));
+            ASSERT_NULL(strstr(inner, "missing-file-sentinel"));
+            ASSERT_NULL(strstr(inner, "missing-qn-sentinel"));
+            yyjson_doc_free(outer);
+            free(response);
+        }
+    }
+    PASS();
+}
+
 TEST(tool_search_graph_semantic_only_skips_structural_results_issue1295) {
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
     ASSERT_NOT_NULL(srv);
@@ -21568,6 +21749,7 @@ SUITE(mcp) {
     RUN_TEST(tool_get_file_outline_returns_bounded_filtered_columnar_rows_issue469);
     RUN_TEST(tool_get_file_outline_validates_json_path_limit_and_cancel_issue469);
     RUN_TEST(tool_search_graph_basic);
+    RUN_TEST(tool_search_graph_empty_hint_describes_combined_filters_issue1366);
     RUN_TEST(tool_search_graph_semantic_only_skips_structural_results_issue1295);
     RUN_TEST(tool_search_graph_grouped_dotless_qn_round_trips);
     RUN_TEST(tool_trace_totals_respect_test_filter);
