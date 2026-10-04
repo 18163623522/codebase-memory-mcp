@@ -715,6 +715,45 @@ TEST(cypher_exec_optional_empty_label_no_overflow) {
     PASS();
 }
 
+/* Regression: the relationship variant of the test above. An OPTIONAL MATCH
+ * with a relationship whose start AND terminal are both unbound, and whose
+ * start matches zero nodes, drove cross_join_with_rels with extra_count == 0.
+ * That sized its output for a single binding, and the OPTIONAL fallback then
+ * wrote one row per existing binding without growing the buffer: a heap
+ * buffer overflow once the first MATCH bound more than one node (ASan:
+ * heap-buffer-overflow). The query text reaches this from the MCP query tool. */
+TEST(cypher_exec_optional_empty_label_rel_no_overflow) {
+    cbm_store_t *s = setup_cypher_store(); /* 4 Function nodes */
+    cbm_cypher_result_t r = {0};
+
+    int rc = cbm_cypher_execute(s,
+                                "MATCH (a:Function) OPTIONAL MATCH (x:NoSuchLabel)-[:CALLS]->(y) "
+                                "RETURN a.name, x.name, y.name",
+                                "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.col_count, 3);
+    /* One row per Function, each with x and y left unbound (""). */
+    ASSERT_EQ(r.row_count, 4);
+    const char *want[] = {"HandleOrder", "ValidateOrder", "SubmitOrder", "LogError"};
+    for (int w = 0; w < 4; w++) {
+        int seen = 0;
+        for (int i = 0; i < r.row_count; i++) {
+            if (strcmp(r.rows[i][0], want[w]) == 0) {
+                seen++;
+            }
+        }
+        ASSERT_EQ(seen, 1);
+    }
+    for (int i = 0; i < r.row_count; i++) {
+        ASSERT_STR_EQ(r.rows[i][1], "");
+        ASSERT_STR_EQ(r.rows[i][2], "");
+    }
+
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
 /* Regression: expand_pattern_rels sized its OPTIONAL-expansion output buffer as
  * bind_cap*10 + 1 — room for the bounded expansion (max_new = bind_cap*10) plus
  * a SINGLE OPTIONAL fallback row. When one source saturated the expansion to
@@ -1225,6 +1264,99 @@ TEST(cypher_exec_aggregate_sees_all_edges_beyond_expansion_cap_issue1196) {
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(r2.row_count, 2);
     cbm_cypher_result_free(&r2);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+/* #1364: RETURN DISTINCT de-duplicated only AFTER the engine row cap, so a
+ * value that first appears past the cap was never seen: on a 150k-edge index
+ * `RETURN DISTINCT type(r)` returned 21 of 22 types (HAS_BRANCH, one edge,
+ * missing). The cap must count DISTINCT rows. Fixture: 20 CALLS edges, then
+ * one HAS_BRANCH edge from the last-inserted node; max_rows=5 puts the rare
+ * type far past the raw-row cap. */
+TEST(cypher_return_distinct_counts_distinct_rows_against_cap_issue1364) {
+    cbm_store_t *s = cbm_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(cbm_store_upsert_project(s, "test", "/tmp/test"), CBM_STORE_OK);
+
+    int64_t ids[22];
+    for (int i = 0; i < 22; i++) {
+        char name[32];
+        char qn[64];
+        snprintf(name, sizeof(name), "fn_%02d", i);
+        snprintf(qn, sizeof(qn), "test.%s", name);
+        cbm_node_t n = {.project = "test",
+                        .label = "Function",
+                        .name = name,
+                        .qualified_name = qn,
+                        .file_path = "a.py"};
+        ids[i] = cbm_store_upsert_node(s, &n);
+        ASSERT_GT(ids[i], 0);
+    }
+    for (int i = 0; i < 20; i++) {
+        cbm_edge_t e = {
+            .project = "test", .source_id = ids[i], .target_id = ids[i + 1], .type = "CALLS"};
+        cbm_store_insert_edge(s, &e);
+    }
+    cbm_edge_t rare = {
+        .project = "test", .source_id = ids[21], .target_id = ids[0], .type = "HAS_BRANCH"};
+    cbm_store_insert_edge(s, &rare);
+
+    /* Plain DISTINCT: both types, complete (2 distinct rows << cap of 5). */
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(s, "MATCH ()-[r]->() RETURN DISTINCT type(r) AS t", "test", 5, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 2);
+    bool saw_calls = false;
+    bool saw_branch = false;
+    for (int i = 0; i < r.row_count; i++) {
+        saw_calls = saw_calls || strcmp(r.rows[i][0], "CALLS") == 0;
+        saw_branch = saw_branch || strcmp(r.rows[i][0], "HAS_BRANCH") == 0;
+    }
+    ASSERT_TRUE(saw_calls);
+    ASSERT_TRUE(saw_branch);
+    ASSERT_FALSE(r.truncated);
+    cbm_cypher_result_free(&r);
+
+    /* DISTINCT + ORDER BY shares the cap. */
+    memset(&r, 0, sizeof(r));
+    rc = cbm_cypher_execute(s, "MATCH ()-[r]->() RETURN DISTINCT type(r) AS t ORDER BY t DESC",
+                            "test", 5, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 2);
+    ASSERT_STR_EQ(r.rows[0][0], "HAS_BRANCH");
+    ASSERT_STR_EQ(r.rows[1][0], "CALLS");
+    ASSERT_FALSE(r.truncated);
+    cbm_cypher_result_free(&r);
+
+    /* DISTINCT + ORDER BY + SKIP/LIMIT: SKIP counts distinct rows. */
+    memset(&r, 0, sizeof(r));
+    rc = cbm_cypher_execute(
+        s, "MATCH ()-[r]->() RETURN DISTINCT type(r) AS t ORDER BY t SKIP 1 LIMIT 1", "test", 5,
+        &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 1);
+    ASSERT_STR_EQ(r.rows[0][0], "HAS_BRANCH");
+    ASSERT_FALSE(r.truncated);
+    cbm_cypher_result_free(&r);
+
+    /* An explicit LIMIT on DISTINCT counts distinct rows too. */
+    memset(&r, 0, sizeof(r));
+    rc = cbm_cypher_execute(s, "MATCH ()-[r]->() RETURN DISTINCT type(r) AS t LIMIT 2", "test", 5,
+                            &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 2);
+    ASSERT_FALSE(r.truncated);
+    cbm_cypher_result_free(&r);
+
+    /* More distinct rows than the cap: still bounded and reported truncated. */
+    memset(&r, 0, sizeof(r));
+    rc = cbm_cypher_execute(s, "MATCH (a)-[r]->(b) RETURN DISTINCT b.name", "test", 5, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 5);
+    ASSERT_TRUE(r.truncated);
+    cbm_cypher_result_free(&r);
 
     cbm_store_close(s);
     PASS();
@@ -4869,6 +5001,7 @@ SUITE(cypher) {
     RUN_TEST(cypher_deep_nesting_rejected_not_crash);
     RUN_TEST(cypher_exec_match_all_functions);
     RUN_TEST(cypher_exec_optional_empty_label_no_overflow);
+    RUN_TEST(cypher_exec_optional_empty_label_rel_no_overflow);
     RUN_TEST(cypher_cross_join_alloc_rejects_overflow);
     RUN_TEST(cypher_exec_optional_rel_saturated_no_overflow);
     RUN_TEST(cypher_exec_optional_saturated_does_not_fabricate_no_match);
@@ -4885,6 +5018,7 @@ SUITE(cypher) {
     RUN_TEST(cypher_exec_where_eq);
     RUN_TEST(cypher_exec_unlabeled_where_beyond_result_limit_issue1196);
     RUN_TEST(cypher_exec_aggregate_sees_all_edges_beyond_expansion_cap_issue1196);
+    RUN_TEST(cypher_return_distinct_counts_distinct_rows_against_cap_issue1364);
     RUN_TEST(cypher_exec_varlength_path_semantics_issue797);
     RUN_TEST(cypher_exec_where_coalesce_issue874);
     RUN_TEST(cypher_exec_where_regex);
