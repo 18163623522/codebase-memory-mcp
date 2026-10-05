@@ -357,6 +357,9 @@ bash "$ROOT/tests/test_vm_verdict_contract.sh"
 echo "=== Step 0y2: isolated Windows venue contract ==="
 bash "$ROOT/tests/test_vm_isolation_contract.sh"
 
+echo "=== Step 0y3: setup scripts install through the installers' verified path ==="
+bash "$ROOT/tests/test_setup_scripts_contract.sh"
+
 # Step 0z: PR CI runs only the lanes scripts/ci/select-lanes.sh selects, so a
 # wrong selection is a silent gate loss. The decision table, and the replay of
 # every September 2026 PR push and real failure against it.
@@ -444,6 +447,12 @@ else
     env ${SELECTION_ENV[@]+"${SELECTION_ENV[@]}"} \
         make -f Makefile.cbm test-par ${MAKE_ARGS[@]+"${MAKE_ARGS[@]}"}
 fi
+
+# Step 3a: the runner must ignore an inherited git repository environment
+# (#2003: the pre-commit hook exports GIT_DIR, which overrides `git -C` and
+# pointed fixture git commands at the committer's real repository).
+echo "=== Step 3a: inherited git environment isolation (#2003) ==="
+bash "$ROOT/tests/test_git_env_isolation_contract.sh" "$ROOT/$BUILD_DIR/test-runner"
 
 # Step 4: C++ large-TU index-hang regression guard (#410). Runs the PROD binary
 # in a subprocess with a wall-clock timeout — a hang must fail, not block the run.
