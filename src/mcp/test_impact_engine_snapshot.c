@@ -184,15 +184,21 @@ static bool te_frozen_build(te_ctx_t *c, const char *config_bytes, size_t config
             .rel_path = (const char *)view->files[rows[i].file_index].path,
             .language = rows[i].language};
     }
-    /* The context takes mutable strings; these are copies of the pinned facts. */
-    char root[4096];
+    /* The Git context is display data the build never traverses and the
+     * engine never reads back. It is fixed, so the candidate is a function of
+     * the pinned tree alone: the per-run pin path or the commit ids here land
+     * in the Branch node, make two builds of one tree differ, and turn every
+     * new commit into a semantic-input change that declines incremental repair
+     * of the team artifact's graph. The answer's receipt binds the commit. */
+    char root[] = "/pinned";
     char head[65];
     char merge_base[65];
     char empty[1] = "";
     char branch[] = "pinned";
-    snprintf(root, sizeof(root), "%s", view->root);
-    snprintf(head, sizeof(head), "%s", c->id->head);
-    snprintf(merge_base, sizeof(merge_base), "%s", c->id->merge_base);
+    size_t oid_len = strlen(c->id->head) == 64 ? 64 : 40;
+    memset(head, '0', oid_len);
+    head[oid_len] = '\0';
+    memcpy(merge_base, head, oid_len + 1);
     cbm_git_context_t git = {.is_git = true,
                              .is_detached = true,
                              .root_exists = true,
@@ -214,7 +220,8 @@ static bool te_frozen_build(te_ctx_t *c, const char *config_bytes, size_t config
                                        .config_len = config_len,
                                        .pinned_git = &git,
                                        .files = list,
-                                       .file_count = rows_n};
+                                       .file_count = rows_n,
+                                       .base_db_path = c->base_db[0] ? c->base_db : NULL};
     cbm_pipeline_frozen_t *owner = NULL;
     cbm_pipeline_frozen_status_t status = cbm_pipeline_frozen_create(&in, &owner);
     if (status == CBM_PIPELINE_FROZEN_OK) {
@@ -237,6 +244,7 @@ static bool te_frozen_build(te_ctx_t *c, const char *config_bytes, size_t config
                  error_count && errors[0].path ? errors[0].path : "", error_count ? " " : "",
                  error_count && errors[0].reason ? errors[0].reason : "");
     }
+    c->route = cbm_pipeline_frozen_route(owner);
     cbm_pipeline_frozen_free(owner);
     if (status != CBM_PIPELINE_FROZEN_OK) {
         return te_snapshot_fail(c, CBM_TEST_RESULT_FALLBACK_GRAPH_REJECTED,
@@ -338,6 +346,11 @@ void te_snapshot_free(te_ctx_t *c) {
         te_remove(side);
         snprintf(side, sizeof(side), "%s-shm", c->candidate_db);
         te_remove(side);
+    }
+    if (c->base_db[0]) {
+        /* The imported team-artifact graph (test_impact_engine_artifact.c). */
+        te_remove(c->base_db);
+        (void)cbm_remove_db_sidecars(c->base_db);
     }
     if (c->work_dir[0]) {
         char sub[4200];

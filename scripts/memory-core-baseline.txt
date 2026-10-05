@@ -59,7 +59,6 @@ src/pipeline/lsp_resolve.h	4
 src/pipeline/lsp_surface.c	5
 src/pipeline/pass_calls.c	22
 src/pipeline/pass_compile_commands.c	17
-src/pipeline/pass_complexity.c	15
 src/pipeline/pass_configlink.c	3
 src/pipeline/pass_cross_repo.c	8
 src/pipeline/pass_definitions.c	11

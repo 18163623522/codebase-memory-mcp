@@ -15,6 +15,8 @@
 #include "mcp/test_impact_seed.h"
 #include "mcp/test_impact_source.h"
 #include "mcp/test_impact_tree.h"
+#include "mcp/test_impact_artifact.h"
+#include "pipeline/pipeline_internal.h"
 #include "discover/test_conventions.h"
 #include "foundation/arena.h"
 #include "store/store.h"
@@ -95,11 +97,33 @@ typedef struct {
     bool static_complete;
 
     cbm_test_selection_t *selection;
+
+    /* Team artifact (test_impact_artifact.h). artifact_graph: a verified
+     * bundle of the merge base whose imported graph matched its receipt; it is
+     * the frozen build's incremental base (base_db). */
+    bool artifact_requested;
+    bool artifact_graph;
+    cbm_ti_receipt_t receipt;
+    char base_db[4096];
+    cbm_pipeline_frozen_route_t route;
+    cbm_coverage_map_t *coverage;
+    char *coverage_meta;
+    size_t coverage_meta_len;
+    bool coverage_admitted;
+    cbm_test_result_evidence_reason_t coverage_reasons[16];
+    int coverage_reason_count;
+    int *cov_ids; /* C_eff, ascending (arena) */
+    int cov_count;
+    bool cov_complete;
 } te_ctx_t;
 
 /* Record a run-all reason once; the first diagnostic wins. false only when
  * out of memory. */
 bool te_fallback(te_ctx_t *c, cbm_test_result_fallback_t code, const char *diagnostic);
+/* The first diagnostic of the request wins. */
+void te_note(te_ctx_t *c, const char *text);
+bool te_git(te_ctx_t *c);
+bool te_config(te_ctx_t *c);
 bool te_grow(void **items, int *cap, int count, size_t size);
 bool te_oom(te_ctx_t *c);
 
@@ -107,6 +131,15 @@ bool te_oom(te_ctx_t *c);
 bool te_work_dir(te_ctx_t *c);
 bool te_snapshot(te_ctx_t *c);
 void te_snapshot_free(te_ctx_t *c);
+
+/* test_impact_engine_artifact.c */
+bool te_db_digest(const char *db_path, char hex[65]);
+bool te_artifact_graph(te_ctx_t *c);
+bool te_artifact_coverage(te_ctx_t *c);
+bool te_coverage_ids(te_ctx_t *c);
+void te_artifact_receipt(te_ctx_t *c, cbm_test_result_coverage_receipt_t *r,
+                         cbm_test_result_oid_t (*oid)(const te_ctx_t *, const char *));
+bool te_publish(te_ctx_t *c, const cbm_test_impact_publish_t *p);
 
 /* test_impact_engine_reach.c */
 bool te_fixtures(te_ctx_t *c, int64_t **extra_seeds, int *extra_count, bool **fixture_cases);

@@ -43,7 +43,7 @@ bool te_oom(te_ctx_t *c) {
     return false;
 }
 
-static void te_note(te_ctx_t *c, const char *text) {
+void te_note(te_ctx_t *c, const char *text) {
     if (c->diagnostic && c->diagnostic_len && !c->diagnostic[0] && text) {
         snprintf(c->diagnostic, c->diagnostic_len, "%s", text);
     }
@@ -103,7 +103,7 @@ bool cbm_test_impact_find_git(char *out, size_t out_len) {
     return false;
 }
 
-static bool te_git(te_ctx_t *c) {
+bool te_git(te_ctx_t *c) {
     char git[4096];
     if (!cbm_test_impact_find_git(git, sizeof(git))) {
         return te_fallback(c, CBM_TEST_RESULT_FALLBACK_GIT_UNAVAILABLE, "no git on PATH") && false;
@@ -139,7 +139,7 @@ static bool te_git(te_ctx_t *c) {
 
 /* ── Query-time configuration: the merge base's (M-4) ────────────── */
 
-static bool te_config(te_ctx_t *c) {
+bool te_config(te_ctx_t *c) {
     const char *path = c->rq->config_path;
     char file[4200] = "";
     bool optional = false;
@@ -391,7 +391,11 @@ static bool te_select(te_ctx_t *c) {
                                         .diff_complete = c->diff_complete,
                                         .inventory_complete = c->snapshot_ok,
                                         .static_complete = c->static_complete,
-                                        .coverage_admitted = false};
+                                        .coverage = c->coverage_admitted ? c->coverage : NULL,
+                                        .changed_function_ids = c->cov_ids,
+                                        .changed_function_count = c->cov_count,
+                                        .coverage_admitted = c->coverage_admitted,
+                                        .coverage_changes_complete = c->cov_complete};
     c->selection = cbm_test_select(&input);
     if (!c->selection) {
         return te_fallback(c, CBM_TEST_RESULT_FALLBACK_SELECTION_UNAVAILABLE,
@@ -487,7 +491,7 @@ static void te_receipt(te_ctx_t *c, cbm_test_result_receipt_t *r,
         *graph_reason = CBM_TEST_RESULT_EVIDENCE_DIAGNOSTICS_INCOMPLETE;
         r->graph.rejection_reasons = (cbm_test_result_evidence_reasons_t){graph_reason, 1};
     }
-    r->coverage.state = CBM_TEST_RESULT_COVERAGE_UNAVAILABLE;
+    te_artifact_receipt(c, &r->coverage, te_oid);
 }
 
 static cbm_test_impact_status_t te_answer(te_ctx_t *c, cbm_test_result_t **out) {
@@ -548,6 +552,8 @@ static cbm_test_impact_status_t te_answer(te_ctx_t *c, cbm_test_result_t **out) 
 
 static void te_free(te_ctx_t *c) {
     cbm_test_selection_free(c->selection);
+    cbm_coverage_map_free(c->coverage);
+    cbm_free(CBM_MEM_CLASS_OTHER, c->coverage_meta);
     cbm_ti_seeds_free(c->seeds);
     if (c->scope) {
         (void)cbm_store_read_scope_close(c->scope);
@@ -584,10 +590,11 @@ static void te_steps(te_ctx_t *c) {
     if (!te_classify_rules(c, &need_snapshot, &unmatched) || !need_snapshot) {
         return;
     }
-    if (!te_snapshot(c) || !te_classify_unmatched(c, unmatched) || c->fallback_count) {
+    if (!te_artifact_graph(c) || !te_snapshot(c) || !te_artifact_coverage(c) ||
+        !te_classify_unmatched(c, unmatched) || c->fallback_count) {
         return;
     }
-    if (!te_open_scope(c) || !te_seed(c) || !te_reach(c)) {
+    if (!te_open_scope(c) || !te_seed(c) || !te_reach(c) || !te_coverage_ids(c)) {
         return;
     }
     (void)te_select(c);
@@ -643,6 +650,52 @@ cbm_test_impact_status_t cbm_test_impact_run(const cbm_test_impact_request_t *re
      * silently inside the pipeline without this. */
     cbm_thread_t thread;
     if (cbm_thread_create(&thread, 0, te_job_main, &job) != 0) {
+        return CBM_TEST_IMPACT_OOM;
+    }
+    (void)cbm_thread_join(&thread);
+    return job.status;
+}
+
+typedef struct {
+    const cbm_test_impact_publish_t *request;
+    char *diagnostic;
+    size_t diagnostic_len;
+    cbm_test_impact_status_t status;
+} te_publish_job_t;
+
+static void *te_publish_main(void *arg) {
+    te_publish_job_t *job = arg;
+    const cbm_test_impact_publish_t *p = job->request;
+    /* The steps read a selection request; publishing is the empty change of
+     * HEAD against itself. */
+    cbm_test_impact_request_t rq = {.repo_root = p->repo_root,
+                                    .base_ref = "HEAD",
+                                    .work_parent = p->work_parent,
+                                    .config_path = p->config_path,
+                                    .deadline_ms = p->deadline_ms};
+    te_ctx_t c = {.rq = &rq, .diagnostic = job->diagnostic, .diagnostic_len = job->diagnostic_len};
+    cbm_arena_init(&c.arena);
+    bool ok = te_publish(&c, p);
+    job->status = c.oom ? CBM_TEST_IMPACT_OOM : ok ? CBM_TEST_IMPACT_OK : CBM_TEST_IMPACT_INVALID;
+    te_free(&c);
+    return NULL;
+}
+
+cbm_test_impact_status_t cbm_test_impact_publish(const cbm_test_impact_publish_t *request,
+                                                 char *diagnostic, size_t diagnostic_len) {
+    if (diagnostic && diagnostic_len) {
+        diagnostic[0] = '\0';
+    }
+    if (!request || !request->repo_root || !request->work_parent || !request->out_dir ||
+        !request->deadline_ms) {
+        return CBM_TEST_IMPACT_INVALID;
+    }
+    te_publish_job_t job = {.request = request,
+                            .diagnostic = diagnostic,
+                            .diagnostic_len = diagnostic_len,
+                            .status = CBM_TEST_IMPACT_OOM};
+    cbm_thread_t thread; /* a whole frozen index: the default pipeline stack */
+    if (cbm_thread_create(&thread, 0, te_publish_main, &job) != 0) {
         return CBM_TEST_IMPACT_OOM;
     }
     (void)cbm_thread_join(&thread);

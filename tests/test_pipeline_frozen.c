@@ -1624,6 +1624,89 @@ TEST(pipeline_frozen_rejects_malformed_file_lists) {
     PASS();
 }
 
+/* A base candidate (the team artifact's graph) is repaired incrementally when
+ * the closure route can, rebuilt when it declines, and either way the result
+ * is exactly the graph a build from scratch makes of the same tree. */
+/* Two independent builds never share row ids or a database identity, so they
+ * are compared by graph content. */
+static bool pf_digest(const char *db, unsigned char out[32]) {
+    cbm_store_t *store = cbm_store_open_path_query(db);
+    if (!store)
+        return false;
+    bool ok = cbm_store_graph_content_digest(store, PF_PROJECT, out) == CBM_STORE_OK;
+    cbm_store_close(store);
+    return ok;
+}
+
+/* Builds the source tree into `keep` (renamed from the candidate); base may be
+ * NULL. *route receives the route that built it. */
+static bool pf_build_into(pf_fixture_t *f, const char *base, const char *keep,
+                          cbm_pipeline_frozen_route_t *route) {
+    cbm_git_context_t git = pf_git(f);
+    cbm_pipeline_frozen_inputs_t in = pf_inputs(f, NULL, &git, NULL);
+    in.base_db_path = base;
+    cbm_pipeline_frozen_t *owner = NULL;
+    bool ok = cbm_pipeline_frozen_create(&in, &owner) == CBM_PIPELINE_FROZEN_OK &&
+              pf_build_expected_ok(owner) == CBM_PIPELINE_FROZEN_OK;
+    *route = cbm_pipeline_frozen_route(owner);
+    cbm_pipeline_frozen_free(owner);
+    return ok && rename(f->db, keep) == 0;
+}
+
+TEST(pipeline_frozen_base_repairs_or_rebuilds_to_the_full_graph) {
+    ASSERT_EQ(pf_init_status, 0);
+    pf_fixture_t f = {0};
+    ASSERT_TRUE(pf_open(&f));
+    char base[1024], repaired[1024], full[1024], grown[1024], grown_full[1024];
+    ASSERT_TRUE(pf_path(base, sizeof(base), f.home, "base.db"));
+    ASSERT_TRUE(pf_path(repaired, sizeof(repaired), f.home, "repaired.db"));
+    ASSERT_TRUE(pf_path(full, sizeof(full), f.home, "full.db"));
+    ASSERT_TRUE(pf_path(grown, sizeof(grown), f.home, "grown.db"));
+    ASSERT_TRUE(pf_path(grown_full, sizeof(grown_full), f.home, "grown_full.db"));
+    ASSERT_TRUE(pf_source_write(&f, "helper.c", "int helper(int x) { return x + 1; }\n"));
+    ASSERT_TRUE(
+        pf_source_write(&f, "use.c", "int helper(int x);\nint use(void) { return helper(1); }\n"));
+    cbm_pipeline_frozen_route_t route = CBM_PIPELINE_FROZEN_ROUTE_INCREMENTAL;
+    ASSERT_TRUE(pf_build_into(&f, NULL, base, &route));
+    ASSERT_EQ(route, CBM_PIPELINE_FROZEN_ROUTE_FULL);
+
+    /* A body edit: the closure route repairs the base. */
+    ASSERT_TRUE(pf_source_write(&f, "helper.c", "int helper(int x) { return x + 2; }\n"));
+    ASSERT_TRUE(pf_build_into(&f, base, repaired, &route));
+    ASSERT_EQ(route, CBM_PIPELINE_FROZEN_ROUTE_INCREMENTAL);
+    ASSERT_TRUE(pf_build_into(&f, NULL, full, &route));
+    ASSERT_EQ(route, CBM_PIPELINE_FROZEN_ROUTE_FULL);
+    unsigned char a[32], b[32], c[32];
+    ASSERT_TRUE(pf_digest(repaired, a));
+    ASSERT_TRUE(pf_digest(full, b));
+    ASSERT_MEM_EQ(a, b, 32);
+    ASSERT_TRUE(pf_digest(base, c)); /* the digest sees the edit at all */
+    ASSERT_TRUE(memcmp(a, c, 32) != 0);
+
+    /* A new definition name: yesterday's graph cannot know its referencers, so
+     * the route declines and the build is the full one. */
+    ASSERT_TRUE(pf_source_write(&f, "helper.c",
+                                "int helper(int x) { return x + 2; }\nint extra(void) { "
+                                "return 3; }\n"));
+    ASSERT_TRUE(pf_build_into(&f, base, grown, &route));
+    ASSERT_EQ(route, CBM_PIPELINE_FROZEN_ROUTE_FULL);
+    ASSERT_TRUE(pf_build_into(&f, NULL, grown_full, &route));
+    ASSERT_TRUE(pf_digest(grown, a));
+    ASSERT_TRUE(pf_digest(grown_full, b));
+    ASSERT_MEM_EQ(a, b, 32);
+
+    /* The base is read, never written. */
+    char again[1024];
+    ASSERT_TRUE(pf_path(again, sizeof(again), f.home, "again.db"));
+    unsigned char before[32], after[32];
+    ASSERT_TRUE(pf_digest(base, before));
+    ASSERT_TRUE(pf_build_into(&f, base, again, &route));
+    ASSERT_TRUE(pf_digest(base, after));
+    ASSERT_MEM_EQ(before, after, 32);
+    ASSERT_TRUE(pf_close(&f));
+    PASS();
+}
+
 SUITE(pipeline_frozen) {
     RUN_TEST(pipeline_frozen_real_parse_gap_is_recorded_not_refused);
     pf_init_status = cbm_init();
@@ -1641,5 +1724,6 @@ SUITE(pipeline_frozen) {
     RUN_TEST(pipeline_frozen_indexes_exactly_the_listed_files);
     RUN_TEST(pipeline_frozen_missing_listed_file_is_input_changed);
     RUN_TEST(pipeline_frozen_rejects_malformed_file_lists);
+    RUN_TEST(pipeline_frozen_base_repairs_or_rebuilds_to_the_full_graph);
     cbm_work_arena_release();
 }

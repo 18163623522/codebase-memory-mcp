@@ -546,6 +546,10 @@ void cbm_test_policy_free(cbm_test_policy_t *policy);
 const cbm_test_rule_t *cbm_test_policy_rules(const cbm_test_policy_t *policy, int *count);
 const cbm_test_lane_t *cbm_test_policy_lanes(const cbm_test_policy_t *policy, int *count);
 const char *cbm_test_policy_digest(const cbm_test_policy_t *policy);
+/* test_impact.coverage.compatibility_paths in config order: the files besides
+ * the measured code whose bytes a coverage map depends on (harness, runner,
+ * spawn helpers, build flags). NULL with *count 0 when none are configured. */
+const char *const *cbm_test_policy_compatibility_paths(const cbm_test_policy_t *policy, int *count);
 
 /* Successful classification returns true and either the first matched rule
  * or NULL for no match. false is an evaluation error, NEVER permission to

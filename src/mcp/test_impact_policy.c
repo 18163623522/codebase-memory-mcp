@@ -9,6 +9,8 @@
 
 enum {
     TP_MAX_PATTERN = 65536,
+    TP_MAX_COMPAT_PATHS = 256,
+    TP_MAX_COMPAT_PATH = 1024,
     TP_MAX_EXPANSIONS = 4096,
     TP_MAX_EXPANDED_BYTES = 262144,
     TP_MAX_BRACE_DEPTH = 16,
@@ -70,6 +72,8 @@ struct cbm_test_policy {
     const char *digest;
     size_t expansion_count;
     size_t expanded_bytes;
+    const char **compat_paths;
+    int compat_count;
 };
 
 /* Expansion uses an acyclic graph with shared continuations. Its explicit
@@ -719,6 +723,56 @@ static bool tp_add_builtins(cbm_test_policy_t *policy, int first) {
     return true;
 }
 
+/* A repository-relative file path: no root, no backslash, no empty, `.` or
+ * `..` segment, no trailing slash. */
+static bool tp_relative_path(const char *text, size_t len) {
+    if (!text || !len || len > TP_MAX_COMPAT_PATH || text[0] == '/' || text[len - 1] == '/' ||
+        memchr(text, '\\', len))
+        return false;
+    const char *segment = text;
+    const char *end = text + len;
+    while (segment < end) {
+        const char *slash = memchr(segment, '/', (size_t)(end - segment));
+        size_t n = (size_t)((slash ? slash : end) - segment);
+        if (!n || (n == 1 && segment[0] == '.') ||
+            (n == 2 && segment[0] == '.' && segment[1] == '.'))
+            return false;
+        segment += n + 1;
+    }
+    return true;
+}
+
+/* `coverage`: what a recorded coverage map depends on beyond the code it
+ * measures. Strict on keys: an ignored misspelling would make admitting a map
+ * easier, never harder. */
+static bool tp_parse_coverage(cbm_test_policy_t *policy, yyjson_val *coverage) {
+    bool valid = true;
+    yyjson_val *paths = tp_field(coverage, "compatibility_paths", &valid);
+    if (!valid || yyjson_obj_size(coverage) != (paths ? 1U : 0U) ||
+        (paths && !yyjson_is_arr(paths)))
+        return false;
+    size_t count = paths ? yyjson_arr_size(paths) : 0;
+    if (count > TP_MAX_COMPAT_PATHS)
+        return false;
+    policy->compat_paths =
+        cbm_arena_calloc(&policy->arena, (count ? count : 1) * sizeof(*policy->compat_paths));
+    if (!policy->compat_paths)
+        return false;
+    size_t index, maximum;
+    yyjson_val *path;
+    yyjson_arr_foreach(paths, index, maximum, path) {
+        size_t len = 0;
+        const char *text = tp_string(path, &len);
+        if (!tp_relative_path(text, len))
+            return false;
+        policy->compat_paths[index] = cbm_arena_strdup(&policy->arena, text);
+        if (!policy->compat_paths[index])
+            return false;
+    }
+    policy->compat_count = (int)count;
+    return true;
+}
+
 static bool tp_parse_policy(cbm_test_policy_t *policy, yyjson_val *impact) {
     bool valid = true;
     yyjson_val *rules = NULL, *lanes = NULL;
@@ -727,7 +781,10 @@ static bool tp_parse_policy(cbm_test_policy_t *policy, yyjson_val *impact) {
         rules = tp_field(impact, "rules", &valid);
         lanes = tp_field(impact, "lanes", &valid);
         yyjson_val *unmapped = tp_field(impact, "unmapped_files", &valid);
+        yyjson_val *coverage = tp_field(impact, "coverage", &valid);
         if (!valid || !yyjson_is_uint(version) || yyjson_get_uint(version) != 1)
+            return false;
+        if (coverage && !tp_parse_coverage(policy, coverage))
             return false;
         if (unmapped) {
             const char *text = tp_string(unmapped, NULL);
@@ -830,6 +887,13 @@ const cbm_test_lane_t *cbm_test_policy_lanes(const cbm_test_policy_t *policy, in
 
 const char *cbm_test_policy_digest(const cbm_test_policy_t *policy) {
     return policy ? policy->digest : "";
+}
+
+const char *const *cbm_test_policy_compatibility_paths(const cbm_test_policy_t *policy,
+                                                       int *count) {
+    if (count)
+        *count = policy ? policy->compat_count : 0;
+    return policy && policy->compat_count ? (const char *const *)policy->compat_paths : NULL;
 }
 
 typedef struct {

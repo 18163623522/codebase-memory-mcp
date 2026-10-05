@@ -90,7 +90,21 @@ typedef struct {
      * there is INPUT_CHANGED. NULL with 0 discovers source_root. Copied. */
     const cbm_pipeline_frozen_file_t *files;
     size_t file_count;
+
+    /* Optional: an earlier candidate of the SAME project label (the team
+     * artifact's graph, imported). The build copies it into its stage and routes
+     * through the incremental closure repair; every doubt there declines to the
+     * full build, so the candidate is the full build's graph either way.
+     * Absolute, a regular SQLite file outside source_root; never modified.
+     * NULL builds from scratch. Copied. */
+    const char *base_db_path;
 } cbm_pipeline_frozen_inputs_t;
+
+/* Which route built the candidate. A base whose repair declined is FULL. */
+typedef enum {
+    CBM_PIPELINE_FROZEN_ROUTE_FULL = 0,
+    CBM_PIPELINE_FROZEN_ROUTE_INCREMENTAL = 1,
+} cbm_pipeline_frozen_route_t;
 
 /* Clear *out first. Deep-copy/validate all input; no Git/config filesystem
  * reads, no pipeline/global changes, no directory/DB creation. Caller input
@@ -128,6 +142,8 @@ void cbm_pipeline_frozen_cancel(cbm_pipeline_frozen_t *owner);
  * pass this to a mutating ordinary-pipeline API. No completeness getter exists.
  */
 const cbm_pipeline_t *cbm_pipeline_frozen_diagnostics(const cbm_pipeline_frozen_t *owner);
+/* FULL until a build produced a candidate; then the route that built it. */
+cbm_pipeline_frozen_route_t cbm_pipeline_frozen_route(const cbm_pipeline_frozen_t *owner);
 
 /* Monotone negative observations; zero is NOT a completeness certificate.
  * PARSE_GAP alone does not refuse the candidate: a file that parsed only
@@ -1069,6 +1085,11 @@ void cbm_pipeline_importance_append_prop(cbm_gbuf_node_t *node, double score);
  * re-linked inbound edges. Returns 0 on success; the caller treats failure as
  * a delta-route failure and falls back to a full rebuild. */
 int cbm_pipeline_importance_recompute_store(cbm_store_t *store, const char *project);
+
+/* transitive_loop_depth/recursive over the complete staging store of the
+ * closure-delta route (the in-memory pass's traversal, gathered from SQL).
+ * Runs before the importance rescore. 0 on success. */
+int cbm_pipeline_complexity_recompute_store(cbm_store_t *store, const char *project);
 
 /* Work counters for the importance pass (pass_importance.c). Deltas are read
  * by the complexity suite's linearity gate; never reset by the pass itself, so

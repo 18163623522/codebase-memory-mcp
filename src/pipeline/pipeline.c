@@ -291,6 +291,9 @@ struct cbm_pipeline_frozen {
     bool has_list;
     cbm_pipeline_frozen_file_t *listed;
     size_t listed_count;
+    /* Arena copy of inputs->base_db_path; NULL builds from scratch. */
+    const char *base_db_path;
+    cbm_pipeline_frozen_route_t route;
     char canonical_root[CBM_SZ_4K];
     char canonical_parent[CBM_SZ_4K];
 #if defined(CBM_ENABLE_TEST_SEAMS) && CBM_ENABLE_TEST_SEAMS
@@ -449,7 +452,8 @@ static bool frozen_inputs_valid(const cbm_pipeline_frozen_inputs_t *in) {
     return in && frozen_absolute(in->source_root) && frozen_absolute(in->candidate_db_path) &&
            frozen_string(in->project, true) && cbm_validate_project_name(in->project) &&
            frozen_git_valid(in->pinned_git) && frozen_policy_valid(&in->resource_policy) &&
-           frozen_config_span_valid(in) && frozen_files_valid(in);
+           frozen_config_span_valid(in) && frozen_files_valid(in) &&
+           (!in->base_db_path || frozen_absolute(in->base_db_path));
 }
 
 static int frozen_listed_cmp(const void *left, const void *right) {
@@ -656,6 +660,12 @@ cbm_pipeline_frozen_status_t cbm_pipeline_frozen_create(const cbm_pipeline_froze
     owner->arena = arena;
     owner->external_cancelled = inputs->cancelled;
     cbm_pipeline_frozen_status_t status = frozen_copy_list(owner, inputs);
+    if (status == CBM_PIPELINE_FROZEN_OK && inputs->base_db_path) {
+        owner->base_db_path = cbm_arena_strdup(&owner->arena, inputs->base_db_path);
+        if (!owner->base_db_path) {
+            status = CBM_PIPELINE_FROZEN_OOM;
+        }
+    }
     if (status == CBM_PIPELINE_FROZEN_OK) {
         status = frozen_allocate_pipeline(owner, inputs);
     }
@@ -674,6 +684,11 @@ void cbm_pipeline_frozen_cancel(cbm_pipeline_frozen_t *owner) {
 
 const cbm_pipeline_t *cbm_pipeline_frozen_diagnostics(const cbm_pipeline_frozen_t *owner) {
     return owner ? owner->pipeline : NULL;
+}
+
+cbm_pipeline_frozen_route_t cbm_pipeline_frozen_route(const cbm_pipeline_frozen_t *owner) {
+    return owner && owner->state == FROZEN_CANDIDATE ? owner->route
+                                                     : CBM_PIPELINE_FROZEN_ROUTE_FULL;
 }
 
 bool cbm_pipeline_frozen_negative_evidence(const cbm_pipeline_frozen_t *owner,
@@ -3521,9 +3536,13 @@ static int cbm_pipeline_run_staged(cbm_pipeline_t *p) {
     }
 
     /* Check for existing DB → try incremental or delete for reindex */
-    rc = p->frozen ? CBM_PIPELINE_FORCE_FULL_REINDEX
-                   : try_incremental_or_delete_db(p, files, file_count, baseline_manifest,
-                                                  baseline_count, mode_promoted);
+    rc = p->frozen && !p->frozen->base_db_path
+             ? CBM_PIPELINE_FORCE_FULL_REINDEX
+             : try_incremental_or_delete_db(p, files, file_count, baseline_manifest, baseline_count,
+                                            mode_promoted);
+    if (p->frozen && rc >= 0) {
+        p->frozen->route = CBM_PIPELINE_FROZEN_ROUTE_INCREMENTAL;
+    }
     if (rc == CBM_PIPELINE_ABORT_PRESERVE_DB || rc == CBM_PIPELINE_PERSIST_FAILED) {
         goto cleanup;
     }
@@ -4417,8 +4436,16 @@ static cbm_pipeline_frozen_status_t frozen_run_stage(cbm_pipeline_t *p, const ch
     if (!stage_copy)
         return CBM_PIPELINE_FROZEN_OOM;
     p->db_path = stage_copy;
-    p->existing_generation = false;
-    p->final_existed = false;
+    /* A base candidate becomes the stage's existing generation, so the route
+     * below may repair it instead of rebuilding. */
+    bool based = p->frozen->base_db_path != NULL;
+    if (based && cbm_store_backup_path(p->frozen->base_db_path, stage_copy) != CBM_STORE_OK) {
+        p->db_path = destination;
+        cbm_free(CBM_MEM_CLASS_OTHER, stage_copy);
+        return CBM_PIPELINE_FROZEN_IO;
+    }
+    p->existing_generation = based;
+    p->final_existed = based;
     int rc = cbm_pipeline_run_staged(p);
     p->db_path = destination;
     cbm_free(CBM_MEM_CLASS_OTHER, stage_copy);

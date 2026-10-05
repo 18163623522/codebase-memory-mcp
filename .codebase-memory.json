@@ -44,6 +44,16 @@
         "action": "ignore"
       }
     ],
-    "unmapped_files": "run_all"
+    "unmapped_files": "run_all",
+    "coverage": {
+      "compatibility_paths": [
+        "tests/test_framework.h",
+        "tests/test_main.c",
+        "tests/test_helpers.h",
+        "Makefile.cbm",
+        "scripts/test-impact/coverage-map.py",
+        "scripts/test-impact/coverage-merge.py"
+      ]
+    }
   }
 }

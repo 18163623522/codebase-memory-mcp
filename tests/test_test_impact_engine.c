@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 typedef struct {
     char git[1024];
@@ -152,12 +153,18 @@ static void tie_close(tie_fixture_t *fx) {
     (void)th_rmtree(fx->home);
 }
 
-/* The answer for the topic branch against main, as JSON (owned). */
-static char *tie_answer(tie_fixture_t *fx) {
+/* The answer for the topic branch against main, as JSON (owned); with a
+ * team artifact bundle when one is given. */
+static char *tie_answer_with(tie_fixture_t *fx, const char *bundle, const char *commit,
+                             bool verified) {
     cbm_test_impact_request_t rq = {.repo_root = fx->repo,
                                     .base_ref = "main",
                                     .work_parent = fx->work,
-                                    .deadline_ms = cbm_now_ms() + 120000U};
+                                    .deadline_ms = cbm_now_ms() + 120000U,
+                                    .artifact_dir = bundle,
+                                    .artifact_commit = commit,
+                                    .artifact_verified = verified,
+                                    .platform = "fixture"};
     cbm_test_result_t *out = NULL;
     char diagnostic[512];
     if (cbm_test_impact_run(&rq, &out, diagnostic, sizeof(diagnostic)) != CBM_TEST_IMPACT_OK) {
@@ -172,6 +179,10 @@ static char *tie_answer(tie_fixture_t *fx) {
     char *copy = json ? strdup(json) : NULL;
     cbm_test_result_free(out);
     return copy;
+}
+
+static char *tie_answer(tie_fixture_t *fx) {
+    return tie_answer_with(fx, NULL, NULL, false);
 }
 
 /* The "reasons" array of one suite's entry in the answer. */
@@ -297,9 +308,159 @@ TEST(test_impact_engine_parse_gaps_reach_what_they_name) {
     PASS();
 }
 
+/* The base commit's object id, read from the branch ref (never packed here). */
+static bool tie_base_sha(tie_fixture_t *fx, char sha[65]) {
+    char path[1200];
+    snprintf(path, sizeof(path), "%s/.git/refs/heads/main", fx->repo);
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return false;
+    }
+    size_t n = fread(sha, 1, 64, f);
+    (void)fclose(f);
+    while (n && (sha[n - 1] == '\n' || sha[n - 1] == '\r')) {
+        n--;
+    }
+    sha[n] = '\0';
+    return n == 40 || n == 64;
+}
+
+/* A coverage map of the base: lib_value runs only under alpha_uses_lib,
+ * lib_other only under matrix_one; every setup row is complete and empty. */
+static bool tie_coverage(tie_fixture_t *fx, const char *sha, char *dir, size_t cap) {
+    snprintf(dir, cap, "%s/coverage", fx->home);
+    char meta[1024];
+    snprintf(meta, sizeof(meta),
+             "{\"format\":1,\"commit\":\"%s\",\"functions\":2,\"tests\":4,"
+             "\"incomplete\":0,\"platform\":\"fixture\",\"llvm_profdata\":\"fixture\","
+             "\"suites\":[{\"suite\":\"alpha\",\"tests\":2,\"incomplete\":0,\"exit\":0},"
+             "{\"suite\":\"beta\",\"tests\":1,\"incomplete\":0,\"exit\":0},"
+             "{\"suite\":\"matrix\",\"tests\":1,\"incomplete\":0,\"exit\":0}]}\n",
+             sha);
+    return th_mkdir_p(dir) == 0 &&
+           th_write_file(TH_PATH(dir, "functions.tsv"),
+                         "0\tsrc/lib.c\tlib_value\n1\tsrc/lib.c\tlib_other\n") == 0 &&
+           th_write_file(TH_PATH(dir, "tests.tsv"),
+                         "alpha:*\tcomplete\t\t\nalpha:alpha_plain\tcomplete\t\t\n"
+                         "alpha:alpha_uses_lib\tcomplete\t\t0\nbeta:*\tcomplete\t\t\n"
+                         "beta:beta_alone\tcomplete\t\t\nmatrix:*\tcomplete\t\t\n"
+                         "matrix:matrix_one\tcomplete\t\t1\n") == 0 &&
+           th_write_file(TH_PATH(dir, "meta.json"), meta) == 0;
+}
+
+/* The team artifact: the merge base's bundle, verified by the caller, is the
+ * graph base and its admitted map narrows a suite to the tests that ran the
+ * changed function; the same bundle unverified is ignored, and without a
+ * bundle every suite stays whole. */
+TEST(test_impact_engine_admitted_coverage_narrows_only_when_verified) {
+    tie_fixture_t fx;
+    ASSERT_TRUE(tie_open(&fx));
+    char sha[65];
+    char coverage[1200];
+    char bundle[1200];
+    ASSERT_TRUE(tie_base_sha(&fx, sha));
+    ASSERT_TRUE(tie_coverage(&fx, sha, coverage, sizeof(coverage)));
+    snprintf(bundle, sizeof(bundle), "%s/bundle", fx.home);
+    cbm_test_impact_publish_t publish = {.repo_root = fx.repo,
+                                         .work_parent = fx.work,
+                                         .out_dir = bundle,
+                                         .coverage_dir = coverage,
+                                         .observed_at = (int64_t)time(NULL),
+                                         .platform = "fixture",
+                                         .deadline_ms = cbm_now_ms() + 120000U};
+    char diagnostic[512] = "";
+    cbm_test_impact_status_t published =
+        cbm_test_impact_publish(&publish, diagnostic, sizeof(diagnostic));
+    if (published != CBM_TEST_IMPACT_OK) {
+        printf("  publish: %s\n", diagnostic);
+    }
+    ASSERT_EQ(published, CBM_TEST_IMPACT_OK);
+    ASSERT_TRUE(tie_write(&fx, "src/lib.c",
+                          "int lib_value(void) {\n    return 1 + 0;\n}\n"
+                          "int lib_other(void) {\n    return 2;\n}\n"));
+    ASSERT_TRUE(tie_commit(&fx, "change lib_value"));
+
+    char *plain = tie_answer(&fx);
+    char *verified = tie_answer_with(&fx, bundle, sha, true);
+    char *unverified = tie_answer_with(&fx, bundle, sha, false);
+    ASSERT_NOT_NULL(plain);
+    ASSERT_NOT_NULL(verified);
+    ASSERT_NOT_NULL(unverified);
+    if (!strstr(verified, "\"mode\":\"tests\",\"suite\":\"alpha\"")) {
+        printf("  %.1200s\n", verified);
+    }
+    /* Narrowed: alpha to the one test that ran lib_value; beta not at all. */
+    ASSERT_NOT_NULL(strstr(verified, "\"mode\":\"tests\",\"suite\":\"alpha\""));
+    ASSERT_NOT_NULL(strstr(verified, "\"test\":\"alpha_uses_lib\""));
+    ASSERT_NULL(strstr(verified, "\"test\":\"alpha_plain\""));
+    ASSERT_NULL(strstr(verified, "\"suite\":\"beta\""));
+    /* Unverified and absent: no narrowing. */
+    ASSERT_NOT_NULL(strstr(unverified, "\"mode\":\"whole\",\"suite\":\"beta\""));
+    ASSERT_NOT_NULL(strstr(unverified, "SOURCE_UNVERIFIED"));
+    ASSERT_NOT_NULL(strstr(plain, "\"mode\":\"whole\",\"suite\":\"beta\""));
+    free(plain);
+    free(verified);
+    free(unverified);
+    tie_close(&fx);
+    PASS();
+}
+
+/* A changed function the map does not know (here: not in the map's image,
+ * as platform code would not be) reaches the coverage of its nearest mapped
+ * callers, so the tests that ran lib_value are selected BY COVERAGE when only
+ * lib_win changed. */
+static const char tie_lib_win[] = "int lib_win(void) {\n"
+                                  "    return 0;\n"
+                                  "}\n"
+                                  "int lib_value(void) {\n"
+                                  "    return 1 + lib_win();\n"
+                                  "}\n"
+                                  "int lib_other(void) {\n"
+                                  "    return 2;\n"
+                                  "}\n";
+
+TEST(test_impact_engine_coverage_reaches_unmapped_code_through_mapped_callers) {
+    tie_fixture_t fx;
+    ASSERT_TRUE(tie_open_with(&fx, "src/lib.c", tie_lib_win));
+    char sha[65];
+    char coverage[1200];
+    char bundle[1200];
+    ASSERT_TRUE(tie_base_sha(&fx, sha));
+    ASSERT_TRUE(tie_coverage(&fx, sha, coverage, sizeof(coverage)));
+    snprintf(bundle, sizeof(bundle), "%s/bundle", fx.home);
+    cbm_test_impact_publish_t publish = {.repo_root = fx.repo,
+                                         .work_parent = fx.work,
+                                         .out_dir = bundle,
+                                         .coverage_dir = coverage,
+                                         .observed_at = (int64_t)time(NULL),
+                                         .platform = "fixture",
+                                         .deadline_ms = cbm_now_ms() + 120000U};
+    char diagnostic[512] = "";
+    ASSERT_EQ(cbm_test_impact_publish(&publish, diagnostic, sizeof(diagnostic)),
+              CBM_TEST_IMPACT_OK);
+    ASSERT_TRUE(tie_write(&fx, "src/lib.c",
+                          "int lib_win(void) {\n    return 0 + 0;\n}\n"
+                          "int lib_value(void) {\n    return 1 + lib_win();\n}\n"
+                          "int lib_other(void) {\n    return 2;\n}\n"));
+    ASSERT_TRUE(tie_commit(&fx, "change lib_win only"));
+    char *verified = tie_answer_with(&fx, bundle, sha, true);
+    ASSERT_NOT_NULL(verified);
+    const char *covered = "\"id\":\"alpha:alpha_uses_lib\",\"line\":2,\"reasons\":[\"COVERAGE\"";
+    if (!strstr(verified, covered)) {
+        printf("  %.1200s\n", verified);
+    }
+    ASSERT_NOT_NULL(strstr(verified, covered));
+    ASSERT_NULL(strstr(verified, "\"test\":\"alpha_plain\""));
+    free(verified);
+    tie_close(&fx);
+    PASS();
+}
+
 SUITE(test_impact_engine) {
     RUN_TEST(test_impact_engine_reached_suites_carry_static);
     RUN_TEST(test_impact_engine_macro_registered_tests_select_their_suite);
     RUN_TEST(test_impact_engine_rules_unmapped_and_empty);
     RUN_TEST(test_impact_engine_parse_gaps_reach_what_they_name);
+    RUN_TEST(test_impact_engine_admitted_coverage_narrows_only_when_verified);
+    RUN_TEST(test_impact_engine_coverage_reaches_unmapped_code_through_mapped_callers);
 }

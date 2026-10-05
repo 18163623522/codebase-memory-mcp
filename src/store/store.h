@@ -414,6 +414,16 @@ void cbm_store_close(cbm_store_t *s);
 /* Get the underlying sqlite3 handle (for testing only). */
 struct sqlite3 *cbm_store_get_db(cbm_store_t *s);
 
+/* The digest of a project's graph CONTENT (store_content_digest.c): rows keyed
+ * by what they say, never by row id, database identity, generation or mtime.
+ * Two graphs of the same tree, built incrementally or in full, are equal
+ * exactly when their content digests are. out: 32 raw SHA-256 bytes. */
+int cbm_store_graph_content_digest(cbm_store_t *s, const char *project, unsigned char out[32]);
+/* The part of the content test selection reads: node identity, every edge by
+ * endpoints and type without properties, except the corpus-statistical
+ * SIMILAR_TO / SEMANTICALLY_RELATED; file hashes; index coverage. */
+int cbm_store_graph_topology_digest(cbm_store_t *s, const char *project, unsigned char out[32]);
+
 /* Get the last error message (static string, valid until next call). */
 const char *cbm_store_error(cbm_store_t *s);
 

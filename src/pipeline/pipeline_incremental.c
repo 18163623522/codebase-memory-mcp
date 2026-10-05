@@ -1412,7 +1412,7 @@ static int run_extract_resolve(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *changed
      * a full build takes, which is what makes its output converge. */
 
 #define MIN_FILES_FOR_PARALLEL_INCR 50
-    int worker_count = cbm_default_worker_count(true);
+    int worker_count = cbm_pipeline_is_frozen(ctx->pipeline) ? 1 : cbm_default_worker_count(true);
     bool use_parallel =
         closure != NULL || (worker_count > SKIP_ONE && ci > MIN_FILES_FOR_PARALLEL_INCR);
 
@@ -2514,6 +2514,14 @@ static int run_closure_delta(cbm_pipeline_t *p, const char *db_path, const char 
      * A failure here is a delta-route failure: `result` still holds
      * FORCE_FULL_REINDEX, so the run degrades to a correct full rebuild
      * rather than publishing wrong scores. */
+    cbm_clock_gettime(CLOCK_MONOTONIC, &t);
+    if (cbm_pipeline_complexity_recompute_store(staging, project) != 0) {
+        cbm_log_error("delta.err", "phase", "complexity_recompute");
+        goto out;
+    }
+    cbm_log_info("pass.timing", "pass", "delta_complexity_store", "elapsed_ms",
+                 itoa_buf((int)elapsed_ms(t)));
+
     cbm_clock_gettime(CLOCK_MONOTONIC, &t);
     if (cbm_pipeline_importance_recompute_store(staging, project) != 0) {
         cbm_log_error("delta.err", "phase", "importance_recompute");

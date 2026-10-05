@@ -2500,6 +2500,54 @@ TEST(test_policy_defaults_and_first_match_before_target_resolution) {
 
 /* A change to the selection's own configuration runs everything, in every
  * repository, before any project rule could ignore it (review M-4). */
+/* test_impact.coverage.compatibility_paths: kept in order; strict on keys
+ * (an ignored misspelling would make admitting a coverage map easier) and on
+ * paths (repository-relative, no escaping segment). */
+TEST(test_policy_coverage_compatibility_paths_are_strict) {
+    cbm_test_policy_t *policy =
+        policy_of("{\"test_impact\":{\"version\":1,\"coverage\":{\"compatibility_paths\":"
+                  "[\"tests/test_framework.h\",\"Makefile.cbm\"]}}}");
+    ASSERT_NOT_NULL(policy);
+    int count = 0;
+    const char *const *paths = cbm_test_policy_compatibility_paths(policy, &count);
+    ASSERT_EQ(count, 2);
+    ASSERT_STR_EQ(paths[0], "tests/test_framework.h");
+    ASSERT_STR_EQ(paths[1], "Makefile.cbm");
+    cbm_test_policy_free(policy);
+
+    policy = policy_of("{\"test_impact\":{\"version\":1}}");
+    ASSERT_NOT_NULL(policy);
+    ASSERT_NULL(cbm_test_policy_compatibility_paths(policy, &count));
+    ASSERT_EQ(count, 0);
+    cbm_test_policy_free(policy);
+
+    static const char *const refused[] = {
+        "{\"compatability_paths\":[\"a\"]}",
+        "{\"compatibility_paths\":[\"a\"],\"extra\":1}",
+        "{\"compatibility_paths\":\"a\"}",
+        "{\"compatibility_paths\":[\"/etc/passwd\"]}",
+        "{\"compatibility_paths\":[\"../outside\"]}",
+        "{\"compatibility_paths\":[\"a/./b\"]}",
+        "{\"compatibility_paths\":[\"a//b\"]}",
+        "{\"compatibility_paths\":[\"dir/\"]}",
+        "{\"compatibility_paths\":[\"a\\\\b\"]}",
+        "{\"compatibility_paths\":[\"\"]}",
+        "{\"compatibility_paths\":[7]}",
+        "[]",
+    };
+    for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
+        char body[256];
+        snprintf(body, sizeof(body), "{\"test_impact\":{\"version\":1,\"coverage\":%s}}",
+                 refused[i]);
+        cbm_test_policy_t *bad = policy_of(body);
+        if (bad) {
+            printf("  accepted: %s\n", refused[i]);
+        }
+        ASSERT_NULL(bad);
+    }
+    PASS();
+}
+
 TEST(test_policy_config_change_runs_all) {
     cbm_test_policy_t *policy =
         policy_of("{\"test_impact\":{\"version\":1,\"rules\":[{\"id\":\"late\","
@@ -3697,6 +3745,7 @@ SUITE(test_impact) {
     RUN_TEST(test_policy_embedded_stars_do_not_cross_or_remove_separators);
     RUN_TEST(test_policy_retains_exact_snapshot_and_owns_result);
     RUN_TEST(test_policy_defaults_and_first_match_before_target_resolution);
+    RUN_TEST(test_policy_coverage_compatibility_paths_are_strict);
     RUN_TEST(test_policy_config_change_runs_all);
     RUN_TEST(test_policy_lanes_and_semantic_perf_membership);
     RUN_TEST(test_policy_globs_braces_escapes_and_directory_boundaries);

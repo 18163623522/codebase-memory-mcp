@@ -370,6 +370,11 @@ bash "$ROOT/tests/test_test_impact_predict.sh"
 # child, an unreadable profile, a failed suite) has to come out `incomplete`.
 echo "=== Step 0z6: per-test coverage map builder contract ==="
 bash "$ROOT/tests/test_coverage_map.sh"
+# Step 0z7: a push's incremental coverage map carries the suites it did not
+# re-run onto the new image's function table; a wrong remap would hand the PR
+# selection a map that claims tests ran functions they never touched.
+echo "=== Step 0z7: incremental coverage map merge contract ==="
+bash "$ROOT/tests/test_coverage_merge.sh"
 
 if [ "$CONTRACTS_ONLY" -eq 1 ]; then
     echo "=== test.sh: contracts-only — every contract step passed ==="

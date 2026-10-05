@@ -1734,6 +1734,7 @@ extern void suite_test_impact_classify(void);
 extern void suite_test_impact_source(void);
 extern void suite_test_impact_seed(void);
 extern void suite_test_impact_engine(void);
+extern void suite_test_impact_artifact(void);
 extern void suite_test_impact_runner_filter(void);
 extern void suite_store_search(void);
 extern void suite_cypher(void);
@@ -2124,6 +2125,7 @@ int main(int argc, char **argv) {
     RUN_SELECTED_SUITE(test_impact_source);
     RUN_SELECTED_SUITE(test_impact_seed);
     RUN_SELECTED_SUITE(test_impact_engine);
+    RUN_SELECTED_SUITE(test_impact_artifact);
     RUN_SELECTED_SUITE(test_impact_runner_filter);
     RUN_SELECTED_SUITE(store_search);
     RUN_SELECTED_SUITE(store_bulk);
