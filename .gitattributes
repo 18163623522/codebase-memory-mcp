@@ -15,3 +15,7 @@ scripts/hooks/pre-commit       text eol=lf
 # Chialisp grammar corpus: one case asserts CRLF comment termination, so this
 # file must keep its exact bytes on every platform (no eol conversion). (#919)
 tools/tree-sitter-chialisp/test/corpus/comments.txt -text
+
+# llvm-profdata text captures: tests/test_profile_text_parser.py checks their
+# SHA-256, so they keep their exact bytes on every platform (no eol conversion).
+tests/fixtures/profile_text/*.proftext -text
