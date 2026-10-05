@@ -258,7 +258,6 @@ static cbm_pipeline_frozen_inputs_t pf_inputs(pf_fixture_t *f, const char *confi
                                           .config_bytes = config,
                                           .config_len = config ? strlen(config) : 0,
                                           .pinned_git = git,
-                                          .resource_policy = {0},
                                           .cancelled = cancelled};
 }
 static cbm_pipeline_frozen_status_t pf_create(pf_fixture_t *f, const char *config,

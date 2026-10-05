@@ -420,9 +420,12 @@ TEST(store_graph_digest_invalid_arguments_missing_project_and_initial_latches) {
         int opened=s && collation?cbm_store_read_scope_open(s,NULL,NULL,&scope):CBM_STORE_ERR;
         cbm_store_graph_digest_limits_t lim=gd_room;cbm_store_graph_digest_t out;memset(&out,0xa5,sizeof(out));
         const unsigned char *p=(const unsigned char *)"p";size_t len=1;
-        if(which==2)p=NULL;if(which==3)len=0;if(which==4)len=(size_t)INT_MAX+1;
+        if(which==2)p=NULL;
+        if(which==3)len=0;
+        if(which==4)len=(size_t)INT_MAX+1;
         if(which==5){p=(const unsigned char *)"p\0q";len=3;}
-        if(which==7)lim.max_rows=0;if(which==8)lim.max_framed_bytes=0;
+        if(which==7)lim.max_rows=0;
+        if(which==8)lim.max_framed_bytes=0;
         if(which==9)lim.max_framed_bytes=UINT64_MAX/8+1;
         if(which==10)p=(const unsigned char *)"P";
         int rc=opened==CBM_STORE_OK?cbm_store_graph_digest(which==0?NULL:scope,p,len,which==6?NULL:&lim,which==1?NULL:&out):-1;

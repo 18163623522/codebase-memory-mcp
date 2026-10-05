@@ -13,6 +13,7 @@
 #include "foundation/sha256.h"
 #include "store/store_graph_digest.h"
 #include "store/store_impact.h"
+#include "helpers.h" /* cbm_kind_in_set_free_cache — the job thread's cache teardown */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -621,6 +622,10 @@ static void *te_job_main(void *arg) {
         status = CBM_TEST_IMPACT_CANCELLED;
     }
     te_free(&c);
+    /* The snapshot build extracted on THIS thread, which ends here: its
+     * thread-local node-type bitset cache goes with it (as the MCP index
+     * thread and the parallel workers release theirs). */
+    cbm_kind_in_set_free_cache();
     job->status = status;
     return NULL;
 }
@@ -678,6 +683,7 @@ static void *te_publish_main(void *arg) {
     bool ok = te_publish(&c, p);
     job->status = c.oom ? CBM_TEST_IMPACT_OOM : ok ? CBM_TEST_IMPACT_OK : CBM_TEST_IMPACT_INVALID;
     te_free(&c);
+    cbm_kind_in_set_free_cache(); /* this thread's extraction cache, as in te_job_main */
     return NULL;
 }
 

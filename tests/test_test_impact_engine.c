@@ -16,10 +16,17 @@
 #include "foundation/subprocess.h"
 #include "mcp/test_impact_engine.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+/* glibc's _FORTIFY_SOURCE realpath() aborts unless the output buffer is at
+ * least PATH_MAX bytes, independent of the actual path length. */
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 
 typedef struct {
     char git[1024];
@@ -126,7 +133,7 @@ static bool tie_open_with(tie_fixture_t *fx, const char *extra_path, const char 
     memset(fx, 0, sizeof(*fx));
     const char *git = cbm_find_cli("git", cbm_get_home_dir());
     const char *home = th_mktempdir("cbm-ti-engine");
-    char real[1024];
+    char real[PATH_MAX];
     if (!git || !home || !realpath(home, real) || strlen(git) >= sizeof(fx->git)) {
         return false;
     }

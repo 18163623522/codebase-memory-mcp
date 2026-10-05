@@ -27,7 +27,7 @@ static bool tir_label(tir_context *c, const char *s, tir_bytes *out) {
 
 static bool tir_string_array(tir_context *c, const char *const *strings, int count,
                              tir_bytes **saved) {
-    size_t n;
+    size_t n = 0;
     if (!tir_count(c, strings, count, &n))
         return false;
     tir_bytes *copy = saved ? tir_alloc(c, n, sizeof(*copy)) : NULL;

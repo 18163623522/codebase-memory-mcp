@@ -60,6 +60,7 @@ struct cbm_git_facts {
     cbm_git_facts_error_t stopped;
     gf_batch_budget_t *batch_budget; /* borrowed stack state during one serialized call */
     gf_inventory_cache_t inventory_cache[2];
+    bool no_lazy_fetch; /* the executable takes --no-lazy-fetch (gf_probe_no_lazy_fetch) */
 };
 
 typedef struct {
@@ -486,7 +487,6 @@ static bool gf_run_input(cbm_git_facts_t *facts, const char *const *arguments, i
                             "--no-replace-objects",
                             "--no-pager",
                             "--literal-pathspecs",
-                            "--no-lazy-fetch",
                             "-C",
                             facts->options.root,
                             "-c",
@@ -496,11 +496,13 @@ static bool gf_run_input(cbm_git_facts_t *facts, const char *const *arguments, i
     size_t prefix_count = sizeof(prefix) / sizeof(prefix[0]);
     size_t directory_count = facts->command_git_dir ? 4 : 0;
     if (count < 1 || count >= GF_ARG_CAP ||
-        (size_t)count + prefix_count + directory_count + (size_t)facts->git_pin_count + 1 >
+        (size_t)count + prefix_count + directory_count + (size_t)facts->git_pin_count + 2 >
             GF_ARG_CAP)
         return gf_error(error, CBM_GIT_FACTS_INVALID, "Invalid internal Git command");
     for (size_t i = 0; i < prefix_count; i++)
         argv[argc++] = prefix[i];
+    if (facts->no_lazy_fetch)
+        argv[argc++] = "--no-lazy-fetch";
     if (facts->command_git_dir) {
         argv[argc++] = "--git-dir";
         argv[argc++] = facts->command_git_dir;
@@ -907,6 +909,22 @@ static bool gf_open_identity(cbm_git_facts_t *facts, cbm_git_facts_error_t *erro
     return gf_gate(facts, error);
 }
 
+/* --no-lazy-fetch (git 2.44) keeps an object missing from a partial clone
+ * from being fetched. Older git rejects the option, which failed every engine
+ * command (Ubuntu 24.04 ships git 2.43). There `-c protocol.allow=never`
+ * already turns such a fetch into an error, which is what the option asks
+ * for, so it is passed only when the executable accepts it: one probe per
+ * facts session, outside the command budget, output discarded. */
+static bool gf_probe_no_lazy_fetch(const char *git) {
+    const char *argv[] = {git, "--no-lazy-fetch", "--version", NULL};
+    cbm_proc_opts_t options = {.bin = git,
+                               .argv = argv,
+                               .cancel_grace_ms = CBM_SUBPROCESS_DEFAULT_CANCEL_GRACE_MS,
+                               .strip_git_repo_env = true};
+    cbm_proc_result_t result = {0};
+    return cbm_subprocess_run(&options, &result) == 0 && result.outcome == CBM_PROC_CLEAN;
+}
+
 cbm_git_facts_t *cbm_git_facts_open(const cbm_git_facts_options_t *options,
                                     cbm_git_facts_error_t *error) {
     cbm_git_facts_error_t local;
@@ -959,6 +977,7 @@ cbm_git_facts_t *cbm_git_facts_open(const cbm_git_facts_options_t *options,
         cbm_git_facts_free(facts);
         return NULL;
     }
+    facts->no_lazy_fetch = gf_probe_no_lazy_fetch(facts->options.git_executable);
     if (!gf_open_identity(facts, error)) {
         cbm_git_facts_free(facts);
         return NULL;

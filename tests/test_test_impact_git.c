@@ -2002,7 +2002,9 @@ TEST(test_git_blob_batch_validates_full_selection_and_empty_requests) {
         gfb_error(facts,&request,NULL,CBM_GIT_FACTS_INVALID) && ok;
     for(int i=0;control && i<3;i++) {
         cbm_git_blob_batch_limits_t zero=limits;
-        if(i==0)zero.max_entries=0;if(i==1)zero.max_input_bytes=0;if(i==2)zero.max_arena_bytes=0;
+        if(i==0)zero.max_entries=0;
+        if(i==1)zero.max_input_bytes=0;
+        if(i==2)zero.max_arena_bytes=0;
         ok=gfb_error(facts,&request,&zero,CBM_GIT_FACTS_INVALID) && ok;
     }
     bool no_out=control && !cbm_git_facts_read_blob_batch(facts,&request,&limits,NULL,&error) &&
@@ -2265,7 +2267,8 @@ static cbm_git_bytes_t gfb_concat(CBMArena *arena,cbm_git_bytes_t a,cbm_git_byte
     if(a.length>SIZE_MAX-b.length)return (cbm_git_bytes_t){NULL,0};
     size_t size=a.length+b.length;unsigned char *bytes=cbm_arena_alloc(arena,size?size:1);
     if(!bytes)return (cbm_git_bytes_t){NULL,0};
-    if(a.length)memcpy(bytes,a.data,a.length);if(b.length)memcpy(bytes+a.length,b.data,b.length);
+    if(a.length)memcpy(bytes,a.data,a.length);
+    if(b.length)memcpy(bytes+a.length,b.data,b.length);
     return (cbm_git_bytes_t){bytes,size};
 }
 
