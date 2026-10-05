@@ -636,12 +636,21 @@ typedef struct CBMFileResult {
     // by cbm_free_result(); ordinary single-file results leave these zeroed.
     struct CBMFileResult **owned_results;
     int owned_result_count;
-    /* A consumed configured definition could not be mapped safely. Pipeline
-     * callers must abort publication; error_msg is arena-owned as usual. */
+    /* A consumed configured definition could not be mapped safely. Only an
+     * allocation failure (OOM) still aborts publication: any other status is
+     * degraded per file by cbm_test_declarations_degrade. error_msg is
+     * arena-owned as usual. */
     CBMTestExtractStatus test_declarations_status;
-    int test_declaration_index; /* meaningful on failure; -1 = preset */
+    int test_declaration_index;     /* meaningful on failure; -1 = preset */
     uint32_t test_declaration_line; /* 0 = snapshot preflight */
     bool has_test_definition_owners;
+    /* has_error was raised by a configured-definition issue alone. */
+    bool test_error_only;
+    /* The file's configured test forms could not be mapped: it carries no
+     * configured test roles; the status names why (no pointer: compaction
+     * and spill relocate only the strings they know). */
+    bool test_declarations_degraded;
+    CBMTestExtractStatus test_declarations_degraded_status;
     int test_owner_source_len;
     CBMLanguage test_owner_language;
     char test_owner_source_sha256[65]; /* exact raw source; identity, not authentication */
@@ -739,6 +748,15 @@ typedef struct {
 } CBMExtractCtx;
 
 /* Internal configured-definition seams. No declarations pointer enters a result. */
+/* A configured test form the extractor cannot map degrades the FILE, not
+ * the index (user decision 2026-10-04): its configured test roles, owner
+ * spans and owner flag are dropped, the status reads OK again, an error the
+ * issue alone raised is cleared, and test_declarations_degraded keeps the
+ * reason for a per-file diagnostic. OK and OOM results are left unchanged:
+ * an allocation failure still fails. Idempotent. */
+void cbm_test_declarations_degrade(CBMFileResult *result);
+/* The fixed description of a configured-definition status (static). */
+const char *cbm_test_extract_status_message(CBMTestExtractStatus status);
 bool cbm_test_declarations_validate(CBMFileResult *result,
                                     const cbm_test_declarations_t *declarations);
 void cbm_test_declarations_finish(CBMExtractCtx *ctx);
@@ -859,10 +877,9 @@ CBMFileResult *cbm_extract_file_ex(
  * successful empty inventory. error_msg may be NULL on diagnostic OOM. */
 CBMFileResult *cbm_extract_file_ex_with_tests(
     const char *source, int source_len, CBMLanguage language, const char *project,
-    const char *rel_path, int64_t timeout_micros,
-    const char **extra_defines, const char **include_paths,
-    const CBMMacroTable *macro_table, const CBMReturnTypeTable *return_type_table,
-    const cbm_test_declarations_t *test_declarations);
+    const char *rel_path, int64_t timeout_micros, const char **extra_defines,
+    const char **include_paths, const CBMMacroTable *macro_table,
+    const CBMReturnTypeTable *return_type_table, const cbm_test_declarations_t *test_declarations);
 
 // Free all memory associated with a result.
 void cbm_free_result(CBMFileResult *result);

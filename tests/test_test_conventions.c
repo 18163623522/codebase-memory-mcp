@@ -149,13 +149,22 @@ static bool tc_body_owner(const CBMFileResult *result, const char *source,
     return calls > 0 && usages > 0;
 }
 
+/* A configured form the extractor cannot map is detected with its exact
+ * status and location, then degrades the FILE (user decision 2026-10-04):
+ * the result reads OK, carries no configured roles, and keeps the issue. */
 static bool tc_issue(const CBMFileResult *result, CBMTestExtractStatus status,
                      int index, uint32_t line) {
-    return result && result->has_error && result->error_msg && result->error_msg[0] &&
-        result->test_declarations_status == status &&
+    return result && result->test_declarations_degraded &&
+        result->test_declarations_degraded_status == status &&
+        result->test_declarations_status == CBM_TEST_EXTRACT_OK && !result->has_error &&
         (index == -2 ? result->test_declaration_index >= 0 :
                        result->test_declaration_index == index) &&
         result->test_declaration_line == line;
+}
+static bool tc_degraded(const CBMFileResult *result) {
+    return result && result->test_declarations_degraded &&
+        result->test_declarations_degraded_status != CBM_TEST_EXTRACT_OK &&
+        result->test_declarations_status == CBM_TEST_EXTRACT_OK;
 }
 
 TEST(conventions_null_absent_and_defaults_preserve_legacy) {
@@ -241,7 +250,7 @@ TEST(conventions_duplicates_coalesce_and_conflicts_fail_typed) {
             "src/conflict.c", config) : NULL;
         bool bound = tc_issue(first, CBM_TEST_EXTRACT_AMBIGUOUS, -2, 1) &&
             first->test_declaration_index < 2 && tc_issue(again, CBM_TEST_EXTRACT_AMBIGUOUS,
-            first->test_declaration_index, 1) && tc_text(first->error_msg, again->error_msg);
+            first->test_declaration_index, 1);
         if (!bound) fprintf(stderr, "convention conflict fixture %zu failed\n", i);
         rejected = bound && rejected;
         cbm_free_result(first); cbm_free_result(again); cbm_test_declarations_free(config);
@@ -415,15 +424,12 @@ TEST(conventions_roles_and_errors_survive_compaction_and_spill) {
     CBMFileResult *bad = config ? tc_extract("CHECK(only) {}\n", CBM_LANG_C,
         "src/spill_error.c", config) : NULL;
     cbm_test_declarations_free(config);
-    char error_copy[1024] = {0};
     bool before = tc_ok(good) && tc_role(good, "CHECK_alive", CBM_TEST_ROLE_CASE) &&
-        tc_issue(bad, CBM_TEST_EXTRACT_MISSING_ARGUMENT, 0, 1) &&
-        strlen(bad->error_msg) < sizeof(error_copy);
-    if (before) memcpy(error_copy, bad->error_msg, strlen(bad->error_msg) + 1);
+        tc_issue(bad, CBM_TEST_EXTRACT_MISSING_ARGUMENT, 0, 1);
     if (good) cbm_result_compact(good);
     if (bad) cbm_result_compact(bad);
     bool compacted = tc_ok(good) && tc_role(good, "CHECK_alive", CBM_TEST_ROLE_CASE) &&
-        tc_issue(bad, CBM_TEST_EXTRACT_MISSING_ARGUMENT, 0, 1) && tc_text(bad->error_msg, error_copy);
+        tc_issue(bad, CBM_TEST_EXTRACT_MISSING_ARGUMENT, 0, 1);
     const char *temporary = th_mktempdir("cbm-test-conventions");
     char directory[512] = {0};
     bool dir_ok = temporary && strlen(temporary) < sizeof(directory);
@@ -436,15 +442,16 @@ TEST(conventions_roles_and_errors_survive_compaction_and_spill) {
     if (parked_bad) bad = NULL;
     CBMFileResult header = {0};
     bool header_ok = parked_bad && cbm_result_spill_peek_header(spill, 1, &header) &&
-        header.test_declarations_status == CBM_TEST_EXTRACT_MISSING_ARGUMENT &&
-        header.test_declaration_index == 0 && header.test_declaration_line == 1 && header.has_error;
+        header.test_declarations_degraded &&
+        header.test_declarations_degraded_status == CBM_TEST_EXTRACT_MISSING_ARGUMENT &&
+        header.test_declarations_status == CBM_TEST_EXTRACT_OK &&
+        header.test_declaration_index == 0 && header.test_declaration_line == 1 && !header.has_error;
     CBMFileResult *loaded_good = parked_good ? cbm_result_spill_load(spill, 0) : NULL;
     CBMFileResult *loaded_bad = parked_bad ? cbm_result_spill_load(spill, 1) : NULL;
     if (spill) cbm_result_spill_close(spill);
     bool reloaded = tc_ok(loaded_good) && tc_role(loaded_good, "CHECK_alive", CBM_TEST_ROLE_CASE) &&
         tc_def(loaded_good, "CHECK_alive")->is_test &&
-        tc_issue(loaded_bad, CBM_TEST_EXTRACT_MISSING_ARGUMENT, 0, 1) &&
-        tc_text(loaded_bad->error_msg, error_copy);
+        tc_issue(loaded_bad, CBM_TEST_EXTRACT_MISSING_ARGUMENT, 0, 1);
     cbm_free_result(good); cbm_free_result(bad);
     cbm_free_result(loaded_good); cbm_free_result(loaded_bad);
     int cleanup = dir_ok ? th_rmtree(directory) : -1;
@@ -734,8 +741,7 @@ TEST(conventions_cpp_digit_separator_does_not_hide_mapping) {
     CBMFileResult *bad = config ? tc_extract("int n=1'000;\nCHECK(alpha);\n",
         CBM_LANG_CPP, "src/digits.cpp", config) : NULL;
     bool control = tc_ok(good) && tc_only_case(good, "CHECK_alpha");
-    bool rejected = bad && bad->has_error && bad->test_declarations_status != CBM_TEST_EXTRACT_OK &&
-        bad->error_msg && bad->error_msg[0] && bad->test_declaration_index == 0 &&
+    bool rejected = tc_degraded(bad) && bad->test_declaration_index == 0 &&
         bad->test_declaration_line == 2;
     cbm_free_result(good); cbm_free_result(bad); cbm_test_declarations_free(config);
     ASSERT_TRUE(parsed); ASSERT_TRUE(control); ASSERT_TRUE(rejected);
@@ -753,8 +759,7 @@ TEST(conventions_define_multiline_comment_preserves_complete_audit) {
         "#define N 1 /* ordinary\ncomment\nCHECK(ok) {}\n",
         CBM_LANG_C, "src/comments.c", config) : NULL;
     bool control = tc_ok(good) && tc_only_case(good, "CHECK_ok");
-    bool rejected = bad && bad->has_error && bad->test_declarations_status != CBM_TEST_EXTRACT_OK &&
-        bad->error_msg && bad->error_msg[0];
+    bool rejected = tc_degraded(bad);
     cbm_free_result(good); cbm_free_result(bad); cbm_test_declarations_free(config);
     ASSERT_TRUE(parsed); ASSERT_TRUE(control); ASSERT_TRUE(rejected);
     PASS();

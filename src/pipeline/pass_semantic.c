@@ -670,10 +670,12 @@ static CBMFileResult *sem_get_or_extract(cbm_pipeline_ctx_t *ctx, int file_idx,
         }
         return NULL;
     }
-    CBMFileResult *r = cbm_pipeline_test_force_extract_null(ctx, fi->language) ? NULL :
-        cbm_extract_file_ex_with_tests(
-        source, source_len, fi->language, ctx->project_name, fi->rel_path,
-        CBM_EXTRACT_BUDGET, NULL, NULL, NULL, NULL, ctx->test_declarations);
+    CBMFileResult *r =
+        cbm_pipeline_test_force_extract_null(ctx, fi->language)
+            ? NULL
+            : cbm_extract_file_ex_with_tests(source, source_len, fi->language, ctx->project_name,
+                                             fi->rel_path, CBM_EXTRACT_BUDGET, NULL, NULL, NULL,
+                                             NULL, ctx->test_declarations);
     cbm_free(CBM_MEM_CLASS_SEMANTIC, source);
     (void)cbm_pipeline_test_extraction_ok(ctx, fi->language, r);
     if (r) {

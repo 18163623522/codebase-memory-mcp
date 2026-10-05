@@ -1264,7 +1264,8 @@ static void pf_diag_before_publish(cbm_pipeline_t *pipeline, const char *stage, 
     unsigned flags = 123;
     hook->building_getter =
         !cbm_pipeline_frozen_negative_evidence(hook->owner, &flags) && flags == 0;
-    char path[] = "ordinary.c", reason[] = "observed fixture diagnostic", phase[] = "parse_partial";
+    /* A blocking phase: a partial parse alone no longer refuses publication. */
+    char path[] = "ordinary.c", reason[] = "observed fixture diagnostic", phase[] = "extract";
     cbm_pipeline_add_file_error(pipeline, path, hook->incomplete ? NULL : reason, phase);
     memset(path, 'x', sizeof(path) - 1);
     memset(reason, 'y', sizeof(reason) - 1);
@@ -1337,7 +1338,7 @@ static bool pf_diag_run(pf_fixture_t *f, cbm_pipeline_frozen_diag_fault_t fault,
                     pf_text(rows[0].path, hook.followup ? "followup.c" : "ordinary.c") &&
                     pf_text(rows[0].reason, hook.followup ? "retained later diagnostic"
                                                           : "observed fixture diagnostic") &&
-                    pf_text(rows[0].phase, hook.followup ? "extract" : "parse_partial");
+                    pf_text(rows[0].phase, "extract");
     bool failed_state =
         !cbm_pipeline_frozen_candidate_path(owner) &&
         cbm_pipeline_frozen_build(owner) == CBM_PIPELINE_FROZEN_INVALID &&
@@ -1451,10 +1452,11 @@ TEST(pipeline_frozen_diagnostic_state_and_cancel_precedence) {
     PASS();
 }
 
-/* The recovered one-line macro retains a real parse-coverage diagnostic.
- * Keep it as a publication-rejection case while the positive owner/config
- * cases use multiline recovered definitions with unambiguous body ranges. */
-TEST(pipeline_frozen_real_parse_diagnostic_blocks_publication) {
+/* The recovered one-line macro retains a real parse-coverage diagnostic. A
+ * partial parse is a parse gap (user decision 2026-10-04): the candidate is
+ * published, the row is kept, and only the non-blocking PARSE_GAP bit is set,
+ * so the selection can treat a change to this file as a parse gap. */
+TEST(pipeline_frozen_real_parse_gap_is_recorded_not_refused) {
     ASSERT_EQ(pf_init_status, 0);
     static const char one_line[] =
         "void case_sink(void) {}\nvoid suite_sink(void) {}\n"
@@ -1472,12 +1474,12 @@ TEST(pipeline_frozen_real_parse_diagnostic_blocks_publication) {
     cbm_file_error_t *rows = NULL;
     int count = 0;
     cbm_pipeline_get_file_errors(cbm_pipeline_frozen_diagnostics(owner), &rows, &count);
-    bool recorded = evidence && flags == CBM_PIPELINE_FROZEN_FILE_DIAGNOSTIC && rows &&
-                    count == 1 && pf_text(rows[0].path, "unit.pfsource") &&
+    bool recorded = evidence && flags == CBM_PIPELINE_FROZEN_PARSE_GAP && rows && count == 1 &&
+                    pf_text(rows[0].path, "unit.pfsource") &&
                     pf_text(rows[0].phase, "parse_partial") && pf_text(rows[0].reason, "3-3");
-    bool rejected = status == CBM_PIPELINE_FROZEN_PIPELINE_ERROR &&
-                    !cbm_pipeline_frozen_candidate_path(owner) && pf_absent(f.db) &&
-                    pf_directory_only(f.destination, NULL) && pf_files_equal(f.control, f.saved);
+    const char *candidate = cbm_pipeline_frozen_candidate_path(owner);
+    bool published = status == CBM_PIPELINE_FROZEN_OK && candidate && pf_text(candidate, f.db) &&
+                     !pf_absent(f.db) && pf_files_equal(f.control, f.saved);
     cbm_pipeline_frozen_free(owner);
     bool cleanup = pf_close(&f);
     ASSERT_TRUE(setup);
@@ -1486,12 +1488,144 @@ TEST(pipeline_frozen_real_parse_diagnostic_blocks_publication) {
     ASSERT_TRUE(ready);
     ASSERT_TRUE(cleanup);
     ASSERT_TRUE(recorded);
-    ASSERT_TRUE(rejected);
+    ASSERT_TRUE(published);
+    PASS();
+}
+
+/* ── A classified file list instead of discovery ──────────────────── */
+
+static bool pf_has_qn(const char *db, const char *qn) {
+    cbm_store_t *store = cbm_store_open_path_query(db);
+    if (!store)
+        return false;
+    cbm_node_t node = {0};
+    bool found = cbm_store_find_node_by_qn(store, PF_PROJECT, qn, &node) == CBM_STORE_OK;
+    cbm_node_free_fields(&node);
+    cbm_store_close(store);
+    return found;
+}
+
+static cbm_pipeline_frozen_status_t pf_create_listed(pf_fixture_t *f,
+                                                     const cbm_pipeline_frozen_file_t *files,
+                                                     size_t count, cbm_pipeline_frozen_t **out) {
+    cbm_git_context_t git = pf_git(f);
+    cbm_pipeline_frozen_inputs_t in = pf_inputs(f, NULL, &git, NULL);
+    in.files = files;
+    in.file_count = count;
+    return cbm_pipeline_frozen_create(&in, out);
+}
+
+/* The build indexes exactly the listed files, under the listed languages: a
+ * file on disk that is not listed is not indexed, and a listed language wins
+ * over what the name alone would give. */
+TEST(pipeline_frozen_indexes_exactly_the_listed_files) {
+    pf_fixture_t f;
+    cbm_pipeline_frozen_t *owner = NULL;
+    ASSERT_TRUE(pf_open(&f));
+    bool ok = pf_source_write(&f, "listed.c", pf_ordinary) &&
+              pf_source_write(&f, "unlisted.c", "void stray(void) {}\n") &&
+              pf_source_write(&f, "script.foo", "def py_fn():\n    return 1\n") &&
+              pf_source_write(&f, "README.md", "# readme\n");
+    static const cbm_pipeline_frozen_file_t files[] = {
+        {"script.foo", CBM_LANG_PYTHON},
+        {"listed.c", CBM_LANG_C},
+        {"README.md", CBM_LANG_COUNT},
+    };
+    ok = ok && pf_create_listed(&f, files, 3, &owner) == CBM_PIPELINE_FROZEN_OK &&
+         cbm_pipeline_frozen_build(owner) == CBM_PIPELINE_FROZEN_OK;
+    bool listed = ok && pf_has_qn(f.db, PF_PROJECT ".listed.ordinary") &&
+                  pf_has_qn(f.db, PF_PROJECT ".listed.sink");
+    bool unlisted_absent = ok && !pf_has_qn(f.db, PF_PROJECT ".unlisted.stray");
+    bool language_from_list = ok && pf_has_qn(f.db, PF_PROJECT ".script.py_fn");
+    cbm_pipeline_frozen_free(owner);
+    ASSERT_TRUE(pf_close(&f));
+    ASSERT_TRUE(ok);
+    ASSERT_TRUE(listed);
+    ASSERT_TRUE(unlisted_absent);
+    ASSERT_TRUE(language_from_list);
+    PASS();
+}
+
+/* A listed file that is not in the source root means the root is not the
+ * snapshot the list came from. */
+TEST(pipeline_frozen_missing_listed_file_is_input_changed) {
+    pf_fixture_t f;
+    cbm_pipeline_frozen_t *owner = NULL;
+    ASSERT_TRUE(pf_open(&f));
+    bool ok = pf_source_write(&f, "listed.c", pf_ordinary);
+    static const cbm_pipeline_frozen_file_t files[] = {{"listed.c", CBM_LANG_C},
+                                                       {"gone.c", CBM_LANG_C}};
+    ok = ok && pf_create_listed(&f, files, 2, &owner) == CBM_PIPELINE_FROZEN_OK;
+    cbm_pipeline_frozen_status_t status =
+        ok ? cbm_pipeline_frozen_build(owner) : CBM_PIPELINE_FROZEN_INVALID;
+    bool no_candidate = ok && cbm_pipeline_frozen_candidate_path(owner) == NULL && pf_absent(f.db);
+    cbm_pipeline_frozen_free(owner);
+    ASSERT_TRUE(pf_close(&f));
+    ASSERT_TRUE(ok);
+    ASSERT_EQ(status, CBM_PIPELINE_FROZEN_INPUT_CHANGED);
+    ASSERT_TRUE(no_candidate);
+    PASS();
+}
+
+/* A list that cannot name files in the source root is refused at create. */
+TEST(pipeline_frozen_rejects_malformed_file_lists) {
+    pf_fixture_t f;
+    ASSERT_TRUE(pf_open(&f));
+    static const struct {
+        cbm_pipeline_frozen_file_t file;
+    } bad[] = {
+        {{"../escape.c", CBM_LANG_C}},
+        {{"/abs.c", CBM_LANG_C}},
+        {{"", CBM_LANG_C}},
+        {{"a//b.c", CBM_LANG_C}},
+        {{"./a.c", CBM_LANG_C}},
+        {{"a/../b.c", CBM_LANG_C}},
+        {{"a\\b.c", CBM_LANG_C}},
+        {{NULL, CBM_LANG_C}},
+        {{"a.c", (CBMLanguage)-1}},
+        {{"a.c", (CBMLanguage)(CBM_LANG_COUNT + 1)}},
+    };
+    bool all_invalid = true;
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        cbm_pipeline_frozen_t *owner = NULL;
+        cbm_pipeline_frozen_status_t status = pf_create_listed(&f, &bad[i].file, 1, &owner);
+        if (status != CBM_PIPELINE_FROZEN_INVALID || owner) {
+            printf("  case %zu: status %d\n", i, (int)status);
+            all_invalid = false;
+        }
+        cbm_pipeline_frozen_free(owner);
+    }
+    /* The same path twice. */
+    static const cbm_pipeline_frozen_file_t twice[] = {{"a.c", CBM_LANG_C}, {"a.c", CBM_LANG_CPP}};
+    cbm_pipeline_frozen_t *owner = NULL;
+    bool twice_invalid =
+        pf_create_listed(&f, twice, 2, &owner) == CBM_PIPELINE_FROZEN_INVALID && owner == NULL;
+    cbm_pipeline_frozen_free(owner);
+    /* A count without a list. */
+    cbm_git_context_t git = pf_git(&f);
+    cbm_pipeline_frozen_inputs_t in = pf_inputs(&f, NULL, &git, NULL);
+    in.file_count = 3;
+    owner = NULL;
+    bool count_invalid =
+        cbm_pipeline_frozen_create(&in, &owner) == CBM_PIPELINE_FROZEN_INVALID && owner == NULL;
+    cbm_pipeline_frozen_free(owner);
+    /* An empty list is a valid list: it indexes nothing. */
+    static const cbm_pipeline_frozen_file_t one[] = {{"a.c", CBM_LANG_C}};
+    in.files = one;
+    in.file_count = 0;
+    owner = NULL;
+    bool empty_ok = cbm_pipeline_frozen_create(&in, &owner) == CBM_PIPELINE_FROZEN_OK && owner;
+    cbm_pipeline_frozen_free(owner);
+    ASSERT_TRUE(pf_close(&f));
+    ASSERT_TRUE(all_invalid);
+    ASSERT_TRUE(twice_invalid);
+    ASSERT_TRUE(count_invalid);
+    ASSERT_TRUE(empty_ok);
     PASS();
 }
 
 SUITE(pipeline_frozen) {
-    RUN_TEST(pipeline_frozen_real_parse_diagnostic_blocks_publication);
+    RUN_TEST(pipeline_frozen_real_parse_gap_is_recorded_not_refused);
     pf_init_status = cbm_init();
     RUN_TEST(pipeline_frozen_config_snapshot_contract);
     RUN_TEST(pipeline_frozen_detached_graph_and_owned_context);
@@ -1504,5 +1638,8 @@ SUITE(pipeline_frozen) {
     RUN_TEST(pipeline_frozen_incomplete_diagnostic_is_sticky);
     RUN_TEST(pipeline_frozen_diagnostic_allocation_failures);
     RUN_TEST(pipeline_frozen_diagnostic_state_and_cancel_precedence);
+    RUN_TEST(pipeline_frozen_indexes_exactly_the_listed_files);
+    RUN_TEST(pipeline_frozen_missing_listed_file_is_input_changed);
+    RUN_TEST(pipeline_frozen_rejects_malformed_file_lists);
     cbm_work_arena_release();
 }

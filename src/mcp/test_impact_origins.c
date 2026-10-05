@@ -278,8 +278,9 @@ static bool or_path(or_work_t *work, cbm_coverage_origin_bytes_t path) {
             }
             if (path.data[offset] == '/') {
                 size_t length = offset - component;
-                if (!length || (path.data[component] == '.' &&
-                                (length == 1 || (length == 2 && path.data[component + 1] == '.')))) {
+                if (!length ||
+                    (path.data[component] == '.' &&
+                     (length == 1 || (length == 2 && path.data[component + 1] == '.')))) {
                     return or_fail(work, CBM_COVERAGE_ORIGIN_FORMAT);
                 }
                 component = offset + 1;
@@ -299,11 +300,16 @@ static bool or_path(or_work_t *work, cbm_coverage_origin_bytes_t path) {
 
 static unsigned or_edit(char status) {
     switch (status) {
-    case 'A': return CBM_COVERAGE_ORIGIN_EDIT_A;
-    case 'M': return CBM_COVERAGE_ORIGIN_EDIT_M;
-    case 'D': return CBM_COVERAGE_ORIGIN_EDIT_D;
-    case 'T': return CBM_COVERAGE_ORIGIN_EDIT_T;
-    default: return 0;
+    case 'A':
+        return CBM_COVERAGE_ORIGIN_EDIT_A;
+    case 'M':
+        return CBM_COVERAGE_ORIGIN_EDIT_M;
+    case 'D':
+        return CBM_COVERAGE_ORIGIN_EDIT_D;
+    case 'T':
+        return CBM_COVERAGE_ORIGIN_EDIT_T;
+    default:
+        return 0;
     }
 }
 
@@ -551,8 +557,8 @@ static bool or_change_sift(or_work_t *work, or_change_t *rows, size_t count, siz
     return true;
 }
 
-static bool or_changes(or_work_t *work, cbm_coverage_origin_bytes_t bytes,
-                       or_change_t **changes, size_t *change_count) {
+static bool or_changes(or_work_t *work, cbm_coverage_origin_bytes_t bytes, or_change_t **changes,
+                       size_t *change_count) {
     size_t count = 0, position = 0;
     or_change_t ignored;
     while (position < bytes.length) {
@@ -602,9 +608,9 @@ static bool or_changes(or_work_t *work, cbm_coverage_origin_bytes_t bytes,
 }
 
 static bool or_reconcile(or_work_t *work, const cbm_changes_t *request,
-                         const cbm_coverage_origin_binding_t *binding,
-                         const or_change_t *ah, size_t ah_count,
-                         const or_change_t *mh, size_t mh_count, cbm_changes_state_t *state) {
+                         const cbm_coverage_origin_binding_t *binding, const or_change_t *ah,
+                         size_t ah_count, const or_change_t *mh, size_t mh_count,
+                         cbm_changes_state_t *state) {
     size_t count;
     const cbm_change_file_t *files = cbm_changes_files(request, &count);
     if (count != mh_count || (count && !files)) {
@@ -768,9 +774,9 @@ static bool or_union_ids(or_work_t *work, cbm_coverage_origin_join_t *result) {
 }
 
 static bool or_join_paths(or_work_t *work, cbm_coverage_origin_join_t *result,
-                          const or_claim_t *claims, size_t claim_count,
-                          const or_change_t *ah, size_t ah_count,
-                          const or_change_t *mh, size_t mh_count, int function_count) {
+                          const or_claim_t *claims, size_t claim_count, const or_change_t *ah,
+                          size_t ah_count, const or_change_t *mh, size_t mh_count,
+                          int function_count) {
     if (ah_count > SIZE_MAX - mh_count) {
         return or_fail(work, CBM_COVERAGE_ORIGIN_LIMIT);
     }
@@ -785,8 +791,7 @@ static bool or_join_paths(or_work_t *work, cbm_coverage_origin_join_t *result,
             return false;
         }
         int order = ai == ah_count ? 1 : mi == mh_count ? -1 : 0;
-        if (ai < ah_count && mi < mh_count &&
-            !or_compare(work, ah[ai].path, mh[mi].path, &order)) {
+        if (ai < ah_count && mi < mh_count && !or_compare(work, ah[ai].path, mh[mi].path, &order)) {
             return false;
         }
         cbm_coverage_origin_path_t path = {0};
@@ -824,9 +829,8 @@ static bool or_join_paths(or_work_t *work, cbm_coverage_origin_join_t *result,
                 path.reasons |= CBM_COVERAGE_ORIGIN_PRESENCE_UNKNOWN;
             } else {
                 bool present_at_a = claim->state >= 2;
-                bool expected_present = path.artifact_status
-                                            ? path.artifact_status != 'A'
-                                            : path.merge_base_status != 'D';
+                bool expected_present = path.artifact_status ? path.artifact_status != 'A'
+                                                             : path.merge_base_status != 'D';
                 if (present_at_a != expected_present) {
                     return or_fail(work, CBM_COVERAGE_ORIGIN_BINDING);
                 }
@@ -881,8 +885,8 @@ static int or_hex_digit(unsigned char ch) {
     return ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : -1;
 }
 
-static bool or_map(or_work_t *work, const cbm_coverage_map_t *map,
-                   const unsigned char expected[32], int *count) {
+static bool or_map(or_work_t *work, const cbm_coverage_map_t *map, const unsigned char expected[32],
+                   int *count) {
     cbm_coverage_format_t format = cbm_coverage_map_format(map);
     if (format != CBM_COVERAGE_FORMAT_FUNCTIONS && format != CBM_COVERAGE_FORMAT_PROFILES) {
         return or_fail(work, CBM_COVERAGE_ORIGIN_BINDING);
@@ -922,10 +926,11 @@ static bool or_span_valid(cbm_coverage_origin_bytes_t span) {
     return span.data || !span.length;
 }
 
-cbm_coverage_origin_status_t cbm_coverage_origin_join(
-    const cbm_coverage_origin_input_t *input, const cbm_coverage_origin_limits_t *limits,
-    cbm_coverage_origin_cancel_fn cancelled, void *cancel_context,
-    cbm_coverage_origin_join_t **out) {
+cbm_coverage_origin_status_t cbm_coverage_origin_join(const cbm_coverage_origin_input_t *input,
+                                                      const cbm_coverage_origin_limits_t *limits,
+                                                      cbm_coverage_origin_cancel_fn cancelled,
+                                                      void *cancel_context,
+                                                      cbm_coverage_origin_join_t **out) {
     if (out) {
         *out = NULL;
     }
@@ -968,8 +973,10 @@ cbm_coverage_origin_status_t cbm_coverage_origin_join(
         }
         total += (uint64_t)lengths[i];
     }
-    or_work_t work = {.limits = *limits, .cancelled = cancelled,
-                      .cancel_context = cancel_context, .status = CBM_COVERAGE_ORIGIN_OK};
+    or_work_t work = {.limits = *limits,
+                      .cancelled = cancelled,
+                      .cancel_context = cancel_context,
+                      .status = CBM_COVERAGE_ORIGIN_OK};
     cbm_arena_init_lazy(&work.arena, 1024);
     cbm_coverage_origin_join_t *result;
     cbm_coverage_origin_bytes_t manifest, ah_bytes, mh_bytes;
@@ -978,8 +985,7 @@ cbm_coverage_origin_status_t cbm_coverage_origin_join(
     size_t claim_count, ah_count, mh_count;
     unsigned reasons;
     int function_count;
-    if (!or_poll(&work) ||
-        !or_hash_matches(&work, input->manifest, binding->manifest_sha256) ||
+    if (!or_poll(&work) || !or_hash_matches(&work, input->manifest, binding->manifest_sha256) ||
         !or_hash_matches(&work, input->artifact_to_head, context->artifact_to_head_sha256) ||
         !or_hash_matches(&work, input->merge_base_to_head, context->merge_base_to_head_sha256) ||
         !or_map(&work, input->coverage, binding->functions_sha256, &function_count) ||
@@ -1013,7 +1019,8 @@ cbm_coverage_origin_status_t cbm_coverage_origin_join(
         result->reasons |= CBM_COVERAGE_ORIGIN_REQUEST_UNKNOWN;
     }
     if (!or_join_paths(&work, result, claims, claim_count, ah, ah_count, mh, mh_count,
-                       function_count) || !or_poll(&work)) {
+                       function_count) ||
+        !or_poll(&work)) {
         goto failure;
     }
     result->arena = work.arena;

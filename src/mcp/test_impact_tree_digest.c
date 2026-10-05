@@ -1,7 +1,7 @@
 #include "mcp/test_impact_tree_internal.h"
 
 static bool tpt_number(tpt_context *c, cbm_sha256_ctx *h, uint64_t number, size_t width) {
-    unsigned char bytes[8];
+    unsigned char bytes[8] = {0};
     for (size_t i = 0; i < width; i++)
         bytes[width - 1 - i] = (unsigned char)(number >> (i * 8));
     return tpt_hash(c, h, bytes, width);

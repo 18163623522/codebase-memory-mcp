@@ -52,9 +52,7 @@ typedef struct {
  * authenticity, source identity, extraction completeness or permission to
  * narrow selection. Do not reuse it as certification for another read scope. */
 cbm_store_graph_digest_status_t cbm_store_graph_digest(
-    cbm_store_read_scope_t *scope,
-    const unsigned char *project, size_t project_len,
-    const cbm_store_graph_digest_limits_t *limits,
-    cbm_store_graph_digest_t *out);
+    cbm_store_read_scope_t *scope, const unsigned char *project, size_t project_len,
+    const cbm_store_graph_digest_limits_t *limits, cbm_store_graph_digest_t *out);
 
 #endif /* CBM_STORE_GRAPH_DIGEST_H */

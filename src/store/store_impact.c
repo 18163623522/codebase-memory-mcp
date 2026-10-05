@@ -31,21 +31,21 @@ enum {
 static const char IMPACT_HANDLES[] = "HANDLES";
 static const char IMPACT_ROUTE_LABEL[] = "Route";
 static const char *const IMPACT_ROUTE_IN[IMPACT_ROUTE_IN_COUNT] = {"HTTP_CALLS", "ASYNC_CALLS",
-                                                                  "GRPC_CALLS"};
+                                                                   "GRPC_CALLS"};
 
 struct cbm_impact_walk {
     sqlite3 *db;
     cbm_store_read_scope_t *scope; /* borrowed; NULL preserves legacy path */
-    int status; /* sticky, keep count intact for allocated-row cleanup */
+    int status;                    /* sticky, keep count intact for allocated-row cleanup */
     char *project;
     char **edge_types; /* owned copies: a hit's via_edge points into these */
     int edge_type_count;
     bool follow_routes;
     int max_hops; /* 0 = fixpoint */
 
-    int64_t max_id;  /* largest node id when the walk opened */
-    int32_t *slot;   /* [max_id + 1]: index into hits + 1; 0 = not reached */
-    uint8_t *sink;   /* [max_id + 1]: reached, never expanded */
+    int64_t max_id; /* largest node id when the walk opened */
+    int32_t *slot;  /* [max_id + 1]: index into hits + 1; 0 = not reached */
+    uint8_t *sink;  /* [max_id + 1]: reached, never expanded */
 
     cbm_impact_hit_t *hits;
     int count;
@@ -91,8 +91,9 @@ static int impact_fail(cbm_impact_walk_t *w, int status) {
         return CBM_STORE_ERR;
     }
     if (w->status == CBM_STORE_OK) {
-        w->status = w->scope ? cbm_store_read_scope_fail(w->scope, status) :
-                              (status == CBM_STORE_CANCELLED ? CBM_STORE_CANCELLED : CBM_STORE_ERR);
+        w->status = w->scope
+                        ? cbm_store_read_scope_fail(w->scope, status)
+                        : (status == CBM_STORE_CANCELLED ? CBM_STORE_CANCELLED : CBM_STORE_ERR);
     }
     sqlite3_reset(w->stmt_node);
     sqlite3_reset(w->stmt_in);
@@ -120,8 +121,8 @@ static bool impact_visible(const cbm_impact_walk_t *w) {
 /* Scoped sorting polls inside comparisons and heap work. Each swap is atomic
  * with respect to cancellation so the array remains a permutation for cleanup.
  * The legacy path retains its existing qsort and comparators exactly. */
-static bool impact_sort_compare(cbm_impact_walk_t *w, const void *a, const void *b,
-                                 bool hits, int *order) {
+static bool impact_sort_compare(cbm_impact_walk_t *w, const void *a, const void *b, bool hits,
+                                int *order) {
     if (!impact_check(w)) {
         return false;
     }
@@ -165,8 +166,8 @@ static void impact_sort_swap(unsigned char *a, unsigned char *b, size_t size) {
     }
 }
 
-static bool impact_sift(cbm_impact_walk_t *w, unsigned char *items, size_t count,
-                        size_t root, size_t size, bool hits) {
+static bool impact_sift(cbm_impact_walk_t *w, unsigned char *items, size_t count, size_t root,
+                        size_t size, bool hits) {
     while (root < count / 2) {
         if (!impact_check(w)) {
             return false;
@@ -174,8 +175,8 @@ static bool impact_sift(cbm_impact_walk_t *w, unsigned char *items, size_t count
         size_t child = root * 2 + 1;
         int order;
         if (child + 1 < count) {
-            if (!impact_sort_compare(w, items + child * size, items + (child + 1) * size,
-                                     hits, &order)) {
+            if (!impact_sort_compare(w, items + child * size, items + (child + 1) * size, hits,
+                                     &order)) {
                 return false;
             }
             if (order < 0) {
@@ -314,8 +315,8 @@ static impact_add_t impact_add_hit(cbm_impact_walk_t *w, impact_frontier_list_t 
 
 /* Follow one edge type from `from` (a frontier hit) to every neighbour not
  * reached yet. stmt selects the far end of the edges of that type. */
-static bool impact_expand(cbm_impact_walk_t *w, sqlite3_stmt *stmt, int from,
-                          const char *edge_type, impact_frontier_list_t *next) {
+static bool impact_expand(cbm_impact_walk_t *w, sqlite3_stmt *stmt, int from, const char *edge_type,
+                          impact_frontier_list_t *next) {
     if (!impact_check(w) || w->hits[from].hop == INT_MAX) {
         return false;
     }
@@ -323,7 +324,8 @@ static bool impact_expand(cbm_impact_walk_t *w, sqlite3_stmt *stmt, int from,
     int hop = w->hits[from].hop + SKIP_ONE;
     if (sqlite3_reset(stmt) != SQLITE_OK ||
         sqlite3_bind_int64(stmt, IMPACT_BIND_ID, from_id) != SQLITE_OK ||
-        sqlite3_bind_text(stmt, IMPACT_BIND_TYPE, edge_type, CBM_NOT_FOUND, SQLITE_STATIC) != SQLITE_OK) {
+        sqlite3_bind_text(stmt, IMPACT_BIND_TYPE, edge_type, CBM_NOT_FOUND, SQLITE_STATIC) !=
+            SQLITE_OK) {
         return false;
     }
     int rc;
@@ -379,8 +381,7 @@ static bool impact_expand_level(cbm_impact_walk_t *w, const impact_frontier_list
                 return false;
             }
             int hit = frontier->items[f].hit;
-            if (w->sink[w->hits[hit].id] ||
-                strcmp(w->hits[hit].label, IMPACT_ROUTE_LABEL) != 0) {
+            if (w->sink[w->hits[hit].id] || strcmp(w->hits[hit].label, IMPACT_ROUTE_LABEL) != 0) {
                 continue;
             }
             if (!impact_expand(w, w->stmt_in, hit, IMPACT_ROUTE_IN[t], next)) {
@@ -419,8 +420,8 @@ void cbm_impact_walk_close(cbm_impact_walk_t *w) {
 
 static bool impact_copy_policy(cbm_impact_walk_t *w, const cbm_impact_policy_t *policy) {
     w->project = cbm_mem_strdup(CBM_MEM_CLASS_STORE, policy->project);
-    w->edge_types = (char **)cbm_calloc(CBM_MEM_CLASS_STORE,
-                                        (size_t)policy->edge_type_count * sizeof(char *));
+    w->edge_types =
+        (char **)cbm_calloc(CBM_MEM_CLASS_STORE, (size_t)policy->edge_type_count * sizeof(char *));
     if (!w->project || !w->edge_types) {
         return false;
     }
@@ -444,9 +445,8 @@ static bool impact_copy_policy(cbm_impact_walk_t *w, const cbm_impact_policy_t *
 
 static bool impact_prepare(cbm_impact_walk_t *w) {
     sqlite3_stmt *max_stmt = NULL;
-    if (!impact_check(w) ||
-        sqlite3_prepare_v2(w->db, "SELECT COALESCE(MAX(id), 0) FROM nodes", CBM_NOT_FOUND,
-                           &max_stmt, NULL) != SQLITE_OK) {
+    if (!impact_check(w) || sqlite3_prepare_v2(w->db, "SELECT COALESCE(MAX(id), 0) FROM nodes",
+                                               CBM_NOT_FOUND, &max_stmt, NULL) != SQLITE_OK) {
         return false;
     }
     bool have_max = sqlite3_step(max_stmt) == SQLITE_ROW;
@@ -454,8 +454,8 @@ static bool impact_prepare(cbm_impact_walk_t *w) {
         w->max_id = sqlite3_column_int64(max_stmt, 0);
     }
     int finalized = sqlite3_finalize(max_stmt);
-    if (!have_max || finalized != SQLITE_OK || !impact_check(w) ||
-        w->max_id < 0 || w->max_id >= INT32_MAX) {
+    if (!have_max || finalized != SQLITE_OK || !impact_check(w) || w->max_id < 0 ||
+        w->max_id >= INT32_MAX) {
         return false;
     }
     /* The whole per-node state, sized once from the graph: whether the walk
@@ -466,18 +466,22 @@ static bool impact_prepare(cbm_impact_walk_t *w) {
     if (!w->slot || !w->sink) {
         return false;
     }
-    if (!impact_check(w) || sqlite3_prepare_v2(w->db,
+    if (!impact_check(w) ||
+        sqlite3_prepare_v2(w->db,
                            "SELECT qualified_name, label FROM nodes WHERE id = ?1 AND project = ?2",
                            CBM_NOT_FOUND, &w->stmt_node, NULL) != SQLITE_OK ||
-        !impact_check(w) || sqlite3_prepare_v2(w->db, "SELECT source_id FROM edges WHERE target_id = ?1 AND type = ?2",
+        !impact_check(w) ||
+        sqlite3_prepare_v2(w->db, "SELECT source_id FROM edges WHERE target_id = ?1 AND type = ?2",
                            CBM_NOT_FOUND, &w->stmt_in, NULL) != SQLITE_OK ||
-        !impact_check(w) || sqlite3_prepare_v2(w->db, "SELECT target_id FROM edges WHERE source_id = ?1 AND type = ?2",
+        !impact_check(w) ||
+        sqlite3_prepare_v2(w->db, "SELECT target_id FROM edges WHERE source_id = ?1 AND type = ?2",
                            CBM_NOT_FOUND, &w->stmt_out, NULL) != SQLITE_OK) {
         return false;
     }
     /* The project never changes for the life of the walk. */
     return sqlite3_bind_text(w->stmt_node, IMPACT_BIND_TYPE, w->project, CBM_NOT_FOUND,
-                             SQLITE_STATIC) == SQLITE_OK && impact_check(w);
+                             SQLITE_STATIC) == SQLITE_OK &&
+           impact_check(w);
 }
 
 static int impact_open(cbm_store_t *s, cbm_store_read_scope_t *scope,
@@ -492,8 +496,8 @@ static int impact_open(cbm_store_t *s, cbm_store_read_scope_t *scope,
         }
     }
     sqlite3 *db = cbm_store_get_db(s);
-    if (!db || !out || !policy || !policy->project || !policy->project[0] ||
-        !policy->edge_types || policy->edge_type_count <= 0) {
+    if (!db || !out || !policy || !policy->project || !policy->project[0] || !policy->edge_types ||
+        policy->edge_type_count <= 0) {
         return scope ? cbm_store_read_scope_fail(scope, CBM_STORE_ERR) : CBM_STORE_ERR;
     }
     cbm_impact_walk_t *w = (cbm_impact_walk_t *)cbm_calloc(CBM_MEM_CLASS_STORE, sizeof(*w));
@@ -516,8 +520,8 @@ int cbm_impact_walk_open(cbm_store_t *s, const cbm_impact_policy_t *policy,
     return impact_open(s, NULL, policy, out);
 }
 
-int cbm_impact_walk_open_scoped(cbm_store_read_scope_t *scope,
-                                const cbm_impact_policy_t *policy, cbm_impact_walk_t **out) {
+int cbm_impact_walk_open_scoped(cbm_store_read_scope_t *scope, const cbm_impact_policy_t *policy,
+                                cbm_impact_walk_t **out) {
     if (!scope) {
         if (out) {
             *out = NULL;
@@ -529,8 +533,7 @@ int cbm_impact_walk_open_scoped(cbm_store_read_scope_t *scope,
 
 /* True when `id` names a node of the walk's project. */
 static bool impact_node_exists(cbm_impact_walk_t *w, int64_t id) {
-    if (!impact_check(w) || !impact_known_id(w, id) ||
-        sqlite3_reset(w->stmt_node) != SQLITE_OK ||
+    if (!impact_check(w) || !impact_known_id(w, id) || sqlite3_reset(w->stmt_node) != SQLITE_OK ||
         sqlite3_bind_int64(w->stmt_node, IMPACT_BIND_ID, id) != SQLITE_OK) {
         return false;
     }

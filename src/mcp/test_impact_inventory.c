@@ -137,6 +137,9 @@ static bool cni_delegate(cni_context *c, cbm_pinned_tree_t *tree, cbm_inventory_
     cbm_inventory_error_t error;
     cbm_inventory_status_t status =
         cbm_inventory_filter_prepare(source, &limits, c->control, &owner->filter, &error);
+    /* The reader lives in this frame; the caller's source must not keep it. */
+    source->read = NULL;
+    source->read_context = NULL;
     /* The filter owns all successful metadata; this release never refunds A. */
     cbm_arena_destroy(&c->temporary);
     if (status != CBM_INVENTORY_OK) {

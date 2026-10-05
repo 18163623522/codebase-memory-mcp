@@ -61,8 +61,8 @@ int cbm_impact_walk_open(cbm_store_t *s, const cbm_impact_policy_t *policy,
 /* Same walk within a pinned read scope, borrowed until close. All work,
  * including ordering, checks cancellation. The first walk error invalidates
  * this walk and its scope. Close the walk before closing the scope. */
-int cbm_impact_walk_open_scoped(cbm_store_read_scope_t *scope,
-                                const cbm_impact_policy_t *policy, cbm_impact_walk_t **out);
+int cbm_impact_walk_open_scoped(cbm_store_read_scope_t *scope, const cbm_impact_policy_t *policy,
+                                cbm_impact_walk_t **out);
 
 /* Nodes that are reached but never expanded: a test case that reaches the
  * change is selected, and what calls the test case is not impacted by it. May

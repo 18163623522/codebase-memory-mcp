@@ -35,8 +35,8 @@ typedef enum {
 } cbm_userconfig_source_state_t;
 
 typedef struct {
-    cbm_userext_t *entries; /* heap-allocated array */
-    int count;              /* number of entries */
+    cbm_userext_t *entries;                  /* heap-allocated array */
+    int count;                               /* number of entries */
     cbm_userconfig_source_t *project_source; /* optional owned project snapshot */
     /* Digests of the exact bytes/state consumed by cbm_userconfig_load(). */
     char global_source_sha256[CBM_SHA256_HEX_LEN + 1];
@@ -64,7 +64,7 @@ cbm_userconfig_t *cbm_userconfig_load_with_source(const char *repo_path);
 /* The PRESENT byte view belongs to cfg and remains valid until free. Outputs
  * are cleared for ABSENT/ERROR. A legacy loader result has no snapshot: ERROR. */
 cbm_userconfig_source_state_t cbm_userconfig_project_source(const cbm_userconfig_t *cfg,
-                                                          const char **bytes, size_t *len);
+                                                            const char **bytes, size_t *len);
 
 /*
  * Look up a file extension in the user config.
@@ -89,9 +89,8 @@ typedef enum {
     CBM_USERCONFIG_SNAPSHOT_OOM
 } cbm_userconfig_snapshot_status_t;
 
-cbm_userconfig_snapshot_status_t
-cbm_userconfig_from_project_bytes(cbm_userconfig_source_state_t state, const void *bytes,
-                                  size_t len, cbm_userconfig_t **out);
+cbm_userconfig_snapshot_status_t cbm_userconfig_from_project_bytes(
+    cbm_userconfig_source_state_t state, const void *bytes, size_t len, cbm_userconfig_t **out);
 
 /* ── Integration hook ───────────────────────────────────────────── */
 

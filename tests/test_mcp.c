@@ -15871,6 +15871,30 @@ TEST(detect_changes_product_filter_uses_project_config_and_override) {
     PASS();
 }
 
+/* scope:"tests" answers with the test_impact object (mcp/test_impact_engine.h).
+ * The selection reads committed changes only: the fixture's edit is in the
+ * worktree, so against main nothing changed. A config_path that does not
+ * exist is evidence missing, never a narrower answer: everything runs. */
+TEST(detect_changes_scope_tests_answers_test_impact) {
+    dc_walk_fixture_t fx;
+    ASSERT_TRUE(dc_walk_fixture_open(&fx));
+    char *text = dc_walk_call(&fx, ",\"scope\":\"tests\"");
+    ASSERT_NOT_NULL(text);
+    if (!strstr(text, "\"decision\":\"nothing\"")) {
+        printf("  %.400s\n", text);
+    }
+    ASSERT_TRUE(strncmp(text, "{\"test_impact\":{", 16) == 0);
+    ASSERT_NOT_NULL(strstr(text, "\"decision\":\"nothing\""));
+    free(text);
+    text = dc_walk_call(&fx, ",\"scope\":\"tests\",\"config_path\":\"missing/config.json\"");
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "\"decision\":\"run_all\""));
+    ASSERT_NOT_NULL(strstr(text, "CONFIG_INVALID"));
+    free(text);
+    dc_walk_fixture_close(&fx);
+    PASS();
+}
+
 TEST(detect_changes_fixpoint_walks_past_depth) {
     dc_walk_fixture_t fx;
     if (!dc_walk_fixture_open(&fx)) {
@@ -21890,6 +21914,7 @@ SUITE(mcp) {
     RUN_TEST(detect_changes_product_filter_does_not_inflate_fallback);
     RUN_TEST(detect_changes_seed_params_reject_misuse);
     RUN_TEST(detect_changes_product_filter_uses_project_config_and_override);
+    RUN_TEST(detect_changes_scope_tests_answers_test_impact);
     RUN_TEST(detect_changes_fixpoint_walks_past_depth);
     RUN_TEST(detect_changes_edge_types_reach_references);
     RUN_TEST(detect_changes_via_names_the_parent);

@@ -333,8 +333,8 @@ static int load_config_file(const char *path, cbm_userext_t **entries, int *coun
 }
 
 /* Retain the project input before parsing it; never reopen for declarations. */
-static int load_project_source(const char *path, cbm_userconfig_t *cfg,
-                               cbm_userext_t **entries, int *count) {
+static int load_project_source(const char *path, cbm_userconfig_t *cfg, cbm_userext_t **entries,
+                               int *count) {
     cbm_userconfig_source_t *source = cfg->project_source;
     source->state = CBM_USERCONFIG_SOURCE_ERROR;
     userconfig_source_digest("read-error", NULL, 0, cfg->project_source_sha256);
@@ -383,23 +383,25 @@ static int load_project_source(const char *path, cbm_userconfig_t *cfg,
 /* ── Public API ──────────────────────────────────────────────────── */
 
 static cbm_userconfig_t *userconfig_load(const char *repo_path, bool retain_source) {
-    cbm_userconfig_t *cfg = calloc(CBM_ALLOC_ONE, sizeof(cbm_userconfig_t));
-    if (!cfg) {
-        return NULL;
-    }
-
+    /* The retained source first: a failure here has nothing else to undo. */
+    cbm_userconfig_source_t *source = NULL;
     if (retain_source) {
         CBMArena arena;
         cbm_arena_init(&arena);
-        cfg->project_source = cbm_arena_calloc(&arena, sizeof(*cfg->project_source));
-        if (!cfg->project_source) {
+        source = cbm_arena_calloc(&arena, sizeof(*source));
+        if (!source) {
             cbm_arena_destroy(&arena);
-            free(cfg);
             return NULL;
         }
-        cfg->project_source->arena = arena;
-        cfg->project_source->state = CBM_USERCONFIG_SOURCE_ABSENT;
+        source->arena = arena;
+        source->state = CBM_USERCONFIG_SOURCE_ABSENT;
     }
+    cbm_userconfig_t *cfg = calloc(CBM_ALLOC_ONE, sizeof(cbm_userconfig_t));
+    if (!cfg) {
+        userconfig_source_free(source);
+        return NULL;
+    }
+    cfg->project_source = source;
 
     cbm_userext_t *entries = NULL;
     int count = 0;
@@ -427,8 +429,8 @@ static cbm_userconfig_t *userconfig_load(const char *repo_path, bool retain_sour
     userconfig_source_digest("not-applicable", NULL, 0, cfg->project_source_sha256);
     if (repo_path && repo_path[0]) {
         char project_path[PATH_BUF_SZ];
-        int path_len = snprintf(project_path, sizeof(project_path), "%s/.codebase-memory.json",
-                                repo_path);
+        int path_len =
+            snprintf(project_path, sizeof(project_path), "%s/.codebase-memory.json", repo_path);
         int rc;
         if (retain_source) {
             if (path_len < 0 || (size_t)path_len >= sizeof(project_path)) {
@@ -499,7 +501,7 @@ cbm_userconfig_t *cbm_userconfig_load_with_source(const char *repo_path) {
 }
 
 cbm_userconfig_source_state_t cbm_userconfig_project_source(const cbm_userconfig_t *cfg,
-                                                          const char **bytes, size_t *len) {
+                                                            const char **bytes, size_t *len) {
     if (bytes)
         *bytes = NULL;
     if (len)
@@ -658,9 +660,8 @@ static cbm_userconfig_snapshot_status_t snapshot_input(cbm_userconfig_source_sta
     return len > MAX_CONFIG_SIZE ? CBM_USERCONFIG_SNAPSHOT_LIMIT : CBM_USERCONFIG_SNAPSHOT_OK;
 }
 
-cbm_userconfig_snapshot_status_t
-cbm_userconfig_from_project_bytes(cbm_userconfig_source_state_t state, const void *bytes,
-                                  size_t len, cbm_userconfig_t **out) {
+cbm_userconfig_snapshot_status_t cbm_userconfig_from_project_bytes(
+    cbm_userconfig_source_state_t state, const void *bytes, size_t len, cbm_userconfig_t **out) {
     if (!out)
         return CBM_USERCONFIG_SNAPSHOT_INVALID;
     *out = NULL;

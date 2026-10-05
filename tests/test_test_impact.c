@@ -10,6 +10,7 @@
 #include "test_helpers.h"
 #include <foundation/subprocess.h>
 #include <mcp/test_impact.h>
+#include <mcp/test_impact_result.h>
 #include <discover/test_conventions.h>
 #include <foundation/mem_core.h>
 #include <stdio.h>
@@ -1686,7 +1687,228 @@ TEST(test_selection_inventory_ambiguity_and_conditionals_use_whole_suite) {
     PASS();
 }
 
-TEST(test_selection_unregistered_changes_and_unknown_runner_membership_run_all) {
+/* Uncertainty is scoped to the file it was found in. A file the model cannot
+ * read with certainty, but which defines its own suite, makes that suite
+ * uncertain (it can only run whole) and leaves every other suite narrowable.
+ * The same uncertainty in the runner's file (the list of runnable suites) or
+ * in a file with no suite of its own stays global. cbm has such a file:
+ * tests/repro/repro_call_argument_matrix_a.c defines its tests by macro. */
+static const char *scoped_main =
+    "void main(void) { RUN_SELECTED_SUITE(alpha); RUN_SELECTED_SUITE(beta); }\n";
+static const char *scoped_cases = "TEST(stat) {}\nSUITE(alpha) { RUN_TEST(stat); }\n";
+static const char *scoped_macro =
+    "#define MAKE(n) \\\n    TEST(n) {}\nTEST(other) {}\nSUITE(beta) { RUN_TEST(other); }\n";
+
+TEST(test_model_uncertainty_is_scoped_to_the_suites_of_its_file) {
+    tm_source_t scoped[] = {{"tests/cases.c", scoped_cases},
+                            {"tests/macro.c", scoped_macro},
+                            {"tests/main.c", scoped_main}};
+    cbm_test_model_t *model = model_of(scoped, 3);
+    ASSERT_NOT_NULL(model);
+    ASSERT_FALSE(cbm_test_model_complete(model));
+    ASSERT_TRUE(cbm_test_model_narrowable(model));
+    int n = 0;
+    const cbm_test_suite_t *suites = cbm_test_model_suites(model, &n);
+    ASSERT_EQ(n, 2);
+    ASSERT_STR_EQ(suites[0].name, "alpha");
+    ASSERT_FALSE(suites[0].uncertain);
+    ASSERT_STR_EQ(suites[1].name, "beta");
+    ASSERT_TRUE(suites[1].uncertain);
+    cbm_test_model_free(model);
+
+    /* The runner's file is uncertain: some runnable suite may be missing. */
+    tm_source_t runner[] = {{"tests/cases.c", scoped_cases},
+                            {"tests/main.c", "int all = 1; \\\n int more = 2;\n"
+                                             "void main(void) { RUN_SELECTED_SUITE(alpha); }\n"}};
+    model = model_of(runner, 2);
+    ASSERT_NOT_NULL(model);
+    ASSERT_FALSE(cbm_test_model_narrowable(model));
+    cbm_test_model_free(model);
+
+    /* An uncertain file with no suite of its own: nothing to scope it to. */
+    tm_source_t loose[] = {{"tests/cases.c", scoped_cases},
+                           {"tests/helper.c", "int helper = 1; \\\n int more = 2;\n"},
+                           {"tests/main.c", "void main(void) { RUN_SELECTED_SUITE(alpha); }\n"}};
+    model = model_of(loose, 3);
+    ASSERT_NOT_NULL(model);
+    ASSERT_FALSE(cbm_test_model_narrowable(model));
+    cbm_test_model_free(model);
+
+    /* No uncertainty at all: complete and narrowable. */
+    tm_source_t clean[] = {{"tests/cases.c", scoped_cases},
+                           {"tests/main.c", "void main(void) { RUN_SELECTED_SUITE(alpha); }\n"}};
+    model = model_of(clean, 2);
+    ASSERT_NOT_NULL(model);
+    ASSERT_TRUE(cbm_test_model_complete(model));
+    ASSERT_TRUE(cbm_test_model_narrowable(model));
+    cbm_test_model_free(model);
+    PASS();
+}
+
+/* A line continuation the lexer reads correctly is no uncertainty: inside a
+ * preprocessor directive (LF and CRLF) or a string literal. Only one in plain
+ * code, which can splice tokens, makes the file uncertain. Before this rule,
+ * any continuation anywhere did, and every cbm test file with a multi-line
+ * #define (cli, mcp, daemon_runtime, extraction, test_main.c) could never be
+ * narrowed. */
+TEST(test_model_only_code_continuations_are_uncertain) {
+    static const struct {
+        const char *text;
+        bool complete;
+    } cases[] = {
+        {"#define MULTI(x) \\\n    do { x; } while (0)\n"
+         "TEST(a) {}\nSUITE(s) { RUN_TEST(a); }\n"
+         "void main(void) { RUN_SELECTED_SUITE(s); }\n",
+         true},
+        {"#define MULTI(x) \\\r\n    (x)\r\n"
+         "TEST(a) {}\r\nSUITE(s) { RUN_TEST(a); }\r\n"
+         "void main(void) { RUN_SELECTED_SUITE(s); }\r\n",
+         true},
+        {"static const char *text = \"a\\\nb\";\n"
+         "TEST(a) {}\nSUITE(s) { RUN_TEST(a); }\n"
+         "void main(void) { RUN_SELECTED_SUITE(s); }\n",
+         true},
+        {"TE\\\nST(a) {}\nSUITE(s) { RUN_TEST(a); }\n"
+         "void main(void) { RUN_SELECTED_SUITE(s); }\n",
+         false},
+        /* a splice that joins a directive word */
+        {"#def\\\nine X 1\nTEST(a) {}\nSUITE(s) { RUN_TEST(a); }\n"
+         "void main(void) { RUN_SELECTED_SUITE(s); }\n",
+         false},
+        /* `*` + splice + `/` closes a block comment, which hides nothing then */
+        {"/* note *\\\n/\nTEST(a) {}\n/* end */\nSUITE(s) { RUN_TEST(a); }\n"
+         "void main(void) { RUN_SELECTED_SUITE(s); }\n",
+         false},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        tm_source_t one[] = {{"tests/one.c", cases[i].text}};
+        cbm_test_model_t *model = model_of(one, 1);
+        ASSERT_NOT_NULL(model);
+        if (cbm_test_model_complete(model) != cases[i].complete) {
+            printf("  case %zu: complete %d\n", i, (int)cbm_test_model_complete(model));
+        }
+        ASSERT_EQ(cbm_test_model_complete(model), cases[i].complete);
+        if (cases[i].complete) {
+            int n = 0;
+            (void)cbm_test_model_registrations(model, &n);
+            ASSERT_EQ(n, 1);
+        }
+        cbm_test_model_free(model);
+    }
+    PASS();
+}
+
+/* The selection runs the uncertain suite whole and still narrows the others. */
+TEST(test_selection_scoped_uncertainty_runs_only_its_suite_whole) {
+    tm_source_t scoped[] = {{"tests/cases.c", scoped_cases},
+                            {"tests/macro.c", scoped_macro},
+                            {"tests/main.c", scoped_main}};
+    cbm_test_model_t *model = model_of(scoped, 3);
+    static const char *rows = "alpha:*\tcomplete\t\t1\nalpha:stat\tcomplete\t\t1\n"
+                              "beta:*\tcomplete\t\t1\nbeta:other\tcomplete\t\t0\n";
+    cbm_coverage_map_t *map = selection_map(rows);
+    ASSERT_NOT_NULL(model);
+    ASSERT_NOT_NULL(map);
+    cbm_test_reach_t reach[] = {{"tests/cases.c", "stat", true, true, false}};
+    int changed[] = {0};
+    cbm_test_selection_input_t input = selection_input(model, map, reach, changed);
+    input.reach_count = 1;
+    cbm_test_selection_t *result = cbm_test_select(&input);
+    ASSERT_NOT_NULL(result);
+    ASSERT_EQ(cbm_test_selection_run_all(result), 0);
+    int count = 0;
+    const cbm_test_selected_suite_t *suites = cbm_test_selection_suites(result, &count);
+    ASSERT_EQ(count, 2);
+    ASSERT_STR_EQ(suites[0].name, "alpha");
+    ASSERT_FALSE(suites[0].whole);
+    ASSERT_STR_EQ(suites[1].name, "beta");
+    ASSERT_TRUE(suites[1].whole);
+    ASSERT_TRUE(suites[1].reasons & CBM_TEST_SELECT_INVENTORY_UNKNOWN);
+    ASSERT_EQ(selection_case_reasons(result, "alpha", "stat"), CBM_TEST_SELECT_STATIC);
+    cbm_test_selection_free(result);
+    cbm_coverage_map_free(map);
+    cbm_test_model_free(model);
+    PASS();
+}
+
+/* A changed test no suite registers runs everything; a runner suite the
+ * model finds no definition for runs whole (its tests are unknown). */
+/* The answer follows the selection: a model whose uncertainty is scoped to
+ * some suites (narrowable, not complete) carries those suites whole and
+ * narrows the rest. Before, the codec demanded a complete model and ran
+ * everything whenever any suite was uncertain (on cbm: always). */
+TEST(test_result_scoped_uncertainty_is_not_a_global_run_all) {
+    tm_source_t scoped[] = {{"tests/cases.c", scoped_cases},
+                            {"tests/macro.c", scoped_macro},
+                            {"tests/main.c", scoped_main}};
+    cbm_test_model_t *model = model_of(scoped, 3);
+    static const char *rows = "alpha:*\tcomplete\t\t1\nalpha:stat\tcomplete\t\t1\n"
+                              "beta:*\tcomplete\t\t1\nbeta:other\tcomplete\t\t0\n";
+    cbm_coverage_map_t *map = selection_map(rows);
+    ASSERT_NOT_NULL(model);
+    ASSERT_NOT_NULL(map);
+    ASSERT_TRUE(cbm_test_model_narrowable(model));
+    ASSERT_FALSE(cbm_test_model_complete(model));
+    cbm_test_reach_t reach[] = {{"tests/cases.c", "stat", true, true, false}};
+    int changed[] = {0};
+    cbm_test_selection_input_t input = selection_input(model, map, reach, changed);
+    input.reach_count = 1;
+    cbm_test_selection_t *selection = cbm_test_select(&input);
+    ASSERT_NOT_NULL(selection);
+    char dir[512], path[600];
+    snprintf(dir, sizeof(dir), "%s/cbm-impact-result-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(dir));
+    snprintf(path, sizeof(path), "%s/absent.json", dir);
+    cbm_test_config_t *config = cbm_test_config_load(path, true);
+    cbm_test_policy_t *policy = config ? cbm_test_policy_new(config) : NULL;
+    ASSERT_NOT_NULL(policy);
+    cbm_test_result_receipt_t receipt = {0};
+    receipt.object_format = CBM_TEST_RESULT_OBJECT_SHA1;
+    receipt.base.format = CBM_TEST_RESULT_OBJECT_SHA1;
+    receipt.head.format = CBM_TEST_RESULT_OBJECT_SHA1;
+    receipt.merge_base.format = CBM_TEST_RESULT_OBJECT_SHA1;
+    receipt.diff_sha256.present = true;
+    receipt.name_status_sha256.present = true;
+    const char *hex = cbm_test_policy_digest(policy);
+    ASSERT_NOT_NULL(hex);
+    for (size_t i = 0; i < 32; i++) {
+        unsigned v = 0;
+        ASSERT_EQ(sscanf(hex + i * 2, "%2x", &v), 1);
+        receipt.policy_sha256.bytes[i] = (unsigned char)v;
+    }
+    receipt.policy_sha256.present = true;
+    cbm_test_result_input_t in = {.comparison = CBM_TEST_RESULT_COMPARISON_CHANGED,
+                                  .selection = selection,
+                                  .model = model,
+                                  .policy = policy,
+                                  .inventory_complete = true,
+                                  .activation_complete = true,
+                                  .receipt = &receipt};
+    cbm_test_result_limits_t limits = {.max_input_bytes = 1048576,
+                                       .max_items = 100000,
+                                       .max_alloc_bytes = 16777216,
+                                       .max_output_bytes = 1048576};
+    cbm_test_result_t *result = NULL;
+    ASSERT_EQ(cbm_test_result_build(&in, &limits, NULL, NULL, &result), CBM_TEST_RESULT_OK);
+    size_t len = 0;
+    const char *json = cbm_test_result_json(result, &len);
+    ASSERT_NOT_NULL(json);
+    if (!strstr(json, "\"decision\":\"selected\"")) {
+        printf("  %.300s\n", json);
+    }
+    ASSERT_NOT_NULL(strstr(json, "\"decision\":\"selected\""));
+    ASSERT_NOT_NULL(strstr(json, "\"run_all_reasons\":[]"));
+    cbm_test_result_free(result);
+    cbm_test_policy_free(policy);
+    cbm_test_config_free(config);
+    cbm_test_selection_free(selection);
+    cbm_coverage_map_free(map);
+    cbm_test_model_free(model);
+    th_rmtree(dir);
+    PASS();
+}
+
+TEST(test_selection_unregistered_changes_run_all_and_undefined_runner_suites_run_whole) {
     const char *sources[] = {
         "TEST(changed) {}\nTEST(stat) {}\nSUITE(alpha) { RUN_TEST(stat); }\n"
         "void main(void) { RUN_SELECTED_SUITE(alpha); }\n",
@@ -1705,12 +1927,57 @@ TEST(test_selection_unregistered_changes_and_unknown_runner_membership_run_all) 
             reach[2].changed = false;
         cbm_test_selection_t *result = cbm_test_select(&input);
         ASSERT_NOT_NULL(result);
-        ASSERT_TRUE(cbm_test_selection_run_all(result) &
-                    (i ? CBM_TEST_SELECT_INVENTORY_UNKNOWN : CBM_TEST_SELECT_CHANGED_UNREGISTERED));
+        if (i == 0) {
+            ASSERT_TRUE(cbm_test_selection_run_all(result) & CBM_TEST_SELECT_CHANGED_UNREGISTERED);
+        } else {
+            ASSERT_EQ(cbm_test_selection_run_all(result), 0);
+            int count = 0;
+            const cbm_test_selected_suite_t *suites = cbm_test_selection_suites(result, &count);
+            ASSERT_EQ(count, 1);
+            ASSERT_STR_EQ(suites[0].name, "alpha");
+            ASSERT_TRUE(suites[0].whole);
+            ASSERT_TRUE(suites[0].reasons & CBM_TEST_SELECT_INVENTORY_UNKNOWN);
+        }
         cbm_test_selection_free(result);
         cbm_test_model_free(model);
     }
     cbm_coverage_map_free(map);
+    PASS();
+}
+
+/* A suite this runner never registers (another runner's, like the repro
+ * board's RUN_SUITE list, or one not built into it) is outside its universe:
+ * its tests are neither selected nor a reason to run everything, even when
+ * one of them changed. On cbm, 49 defined suites are such suites; treating
+ * them as unknown made every selection run everything. */
+TEST(test_selection_other_runners_suites_are_outside_the_selection) {
+    const char *source = "TEST(stat) {}\nTEST(elsewhere) {}\n"
+                         "SUITE(alpha) { RUN_TEST(stat); }\n"
+                         "SUITE(board) { RUN_TEST(elsewhere); }\n"
+                         "void main(void) { RUN_SELECTED_SUITE(alpha); }\n";
+    cbm_test_model_t *model = selection_model(source);
+    static const char *rows = "alpha:*\tcomplete\t\t1\nalpha:stat\tcomplete\t\t0\n";
+    cbm_coverage_map_t *map = selection_map(rows);
+    ASSERT_NOT_NULL(model);
+    ASSERT_NOT_NULL(map);
+    cbm_test_reach_t reach[] = {{"tests/cases.c", "elsewhere", true, true, true},
+                                {"tests/cases.c", "stat", true, true, false}};
+    int changed[] = {0};
+    cbm_test_selection_input_t input = selection_input(model, map, reach, changed);
+    input.reach_count = 2;
+    cbm_test_selection_t *result = cbm_test_select(&input);
+    ASSERT_NOT_NULL(result);
+    ASSERT_EQ(cbm_test_selection_run_all(result), 0);
+    int count = 0;
+    const cbm_test_selected_suite_t *suites = cbm_test_selection_suites(result, &count);
+    ASSERT_EQ(count, 1);
+    ASSERT_STR_EQ(suites[0].name, "alpha");
+    ASSERT_FALSE(suites[0].whole);
+    ASSERT_EQ(selection_case_reasons(result, "alpha", "stat"),
+              CBM_TEST_SELECT_STATIC | CBM_TEST_SELECT_COVERAGE);
+    cbm_test_selection_free(result);
+    cbm_coverage_map_free(map);
+    cbm_test_model_free(model);
     PASS();
 }
 
@@ -2227,6 +2494,22 @@ TEST(test_policy_defaults_and_first_match_before_target_resolution) {
     ASSERT_FALSE(rule[0].builtin);
     ASSERT_EQ(rule[0].key_segment, -1);
     ASSERT_STR_EQ(rule[0].suites[0], "absent");
+    cbm_test_policy_free(policy);
+    PASS();
+}
+
+/* A change to the selection's own configuration runs everything, in every
+ * repository, before any project rule could ignore it (review M-4). */
+TEST(test_policy_config_change_runs_all) {
+    cbm_test_policy_t *policy =
+        policy_of("{\"test_impact\":{\"version\":1,\"rules\":[{\"id\":\"late\","
+                  "\"paths\":[\"src/**\"],\"action\":\"ignore\"}]}}");
+    ASSERT_NOT_NULL(policy);
+    ASSERT_TRUE(policy_matches(policy, ".codebase-memory.json", "builtin:test-impact-config"));
+    ASSERT_TRUE(policy_matches(policy, "sub/.codebase-memory.json", "builtin:test-impact-config"));
+    const cbm_test_rule_t *rule = NULL;
+    ASSERT_TRUE(cbm_test_policy_match_path(policy, ".codebase-memory.json", &rule));
+    ASSERT_EQ(rule->action, CBM_TEST_RULE_RUN_ALL);
     cbm_test_policy_free(policy);
     PASS();
 }
@@ -2962,6 +3245,30 @@ TEST(test_model_guard_like_conditions_cannot_certify_unconditional_cases) {
     PASS();
 }
 
+/* `#ifndef X` + `#define X` that does not start the file is the
+ * define-if-undefined idiom (`WIN32_LEAN_AND_MEAN` in 23 cbm source files),
+ * not an include guard: an ordinary condition whose contents are conditional.
+ * It made those files uncertain, and every cbm registry unnarrowable. */
+TEST(test_model_define_if_undefined_is_an_ordinary_condition) {
+    const char *source = "#include <stdio.h>\n"
+                         "#ifndef LEAN\n#define LEAN\n#endif\n"
+                         "TEST(plain) {}\n"
+                         "#ifndef FEATURE\n#define FEATURE\nTEST(gated) {}\n#endif\n"
+                         "SUITE(alpha) { RUN_TEST(plain); RUN_TEST(gated); }\n";
+    cbm_test_model_t *model = selection_model(source);
+    ASSERT_NOT_NULL(model);
+    ASSERT_TRUE(cbm_test_model_complete(model));
+    int count = 0;
+    const cbm_test_case_t *cases = cbm_test_model_cases(model, &count);
+    ASSERT_EQ(count, 2);
+    ASSERT_STR_EQ(cases[0].name, "plain");
+    ASSERT_FALSE(cases[0].conditional);
+    ASSERT_STR_EQ(cases[1].name, "gated");
+    ASSERT_TRUE(cases[1].conditional);
+    cbm_test_model_free(model);
+    PASS();
+}
+
 TEST(test_model_empty_elif_is_not_certified) {
     const char *branches[] = {"#elif\n", "#elif /* no expression */\n", "#elif // empty\n"};
     for (size_t i = 0; i < sizeof(branches) / sizeof(branches[0]); i++) {
@@ -3171,6 +3478,39 @@ TEST(test_model_descriptors_argument_failures_have_owned_source_diagnostics) {
     PASS();
 }
 
+/* A function-like macro name that is not followed by '(' is not an invocation:
+ * the preprocessor leaves it alone, so it can define or register nothing. An
+ * array or variable that happens to carry a convention's name (cbm itself has
+ * `static const char *const TEST[]` in src/pipeline/pass_semantic_edges.c)
+ * must not make the whole registry uncertain. An opened '(' that never closes
+ * still does. */
+TEST(test_model_descriptors_plain_identifier_with_a_macro_name_is_no_invocation) {
+    cbm_test_model_t *model = descriptor_model(descriptor_config);
+    ASSERT_NOT_NULL(model);
+    const char *source = "static const char *const CASE_AT[] = {\"test\", NULL};\n"
+                         "int USE_AT = 3;\n"
+                         "void *p = &ENTER_AT;\n"
+                         "OTHER_CASE(real) {}\n";
+    ASSERT_TRUE(
+        cbm_test_model_add_source_language(model, "src/not_a_test.c", "c", source, strlen(source)));
+    ASSERT_TRUE(cbm_test_model_finish(model));
+    ASSERT_TRUE(cbm_test_model_complete(model));
+    ASSERT_EQ(cbm_test_model_mapping_status(model, NULL), CBM_TEST_MODEL_MAPPING_OK);
+    ASSERT_EQ(count_cases(model), 1);
+    cbm_test_model_free(model);
+
+    model = descriptor_model(descriptor_config);
+    ASSERT_NOT_NULL(model);
+    const char *open = "CASE_AT(ignore,";
+    ASSERT_TRUE(cbm_test_model_add_source_language(model, "tests/open.c", "c", open, strlen(open)));
+    ASSERT_TRUE(cbm_test_model_finish(model));
+    ASSERT_FALSE(cbm_test_model_complete(model));
+    ASSERT_EQ(cbm_test_model_mapping_status(model, NULL),
+              CBM_TEST_MODEL_MAPPING_MALFORMED_INVOCATION);
+    cbm_test_model_free(model);
+    PASS();
+}
+
 TEST(test_model_descriptors_registration_links_stay_in_their_source_file) {
     cbm_test_model_t *model = descriptor_model(descriptor_config);
     ASSERT_NOT_NULL(model);
@@ -3328,6 +3668,7 @@ SUITE(test_impact) {
     RUN_TEST(test_model_descriptors_keep_unrenderable_names_and_templates_explicit);
     RUN_TEST(test_model_descriptors_duplicates_are_idempotent_and_conflicts_never_narrow);
     RUN_TEST(test_model_descriptors_argument_failures_have_owned_source_diagnostics);
+    RUN_TEST(test_model_descriptors_plain_identifier_with_a_macro_name_is_no_invocation);
     RUN_TEST(test_model_descriptors_registration_links_stay_in_their_source_file);
     RUN_TEST(test_model_descriptors_presets_are_explicit_and_native_gaps_are_visible);
     RUN_TEST(test_model_descriptors_hidden_configured_macros_cannot_certify_inventory);
@@ -3341,6 +3682,7 @@ SUITE(test_impact) {
     RUN_TEST(test_selection_cannot_override_partial_model_with_complete_input_flag);
     RUN_TEST(test_model_split_identifiers_cannot_hide_registrations);
     RUN_TEST(test_model_guard_like_conditions_cannot_certify_unconditional_cases);
+    RUN_TEST(test_model_define_if_undefined_is_an_ordinary_condition);
     RUN_TEST(test_model_empty_elif_is_not_certified);
     RUN_TEST(test_model_null_empty_source_is_safe);
 
@@ -3355,6 +3697,7 @@ SUITE(test_impact) {
     RUN_TEST(test_policy_embedded_stars_do_not_cross_or_remove_separators);
     RUN_TEST(test_policy_retains_exact_snapshot_and_owns_result);
     RUN_TEST(test_policy_defaults_and_first_match_before_target_resolution);
+    RUN_TEST(test_policy_config_change_runs_all);
     RUN_TEST(test_policy_lanes_and_semantic_perf_membership);
     RUN_TEST(test_policy_globs_braces_escapes_and_directory_boundaries);
     RUN_TEST(test_policy_rejects_invalid_consumed_fields_without_changing_seed_loader);
@@ -3374,7 +3717,12 @@ SUITE(test_impact) {
     RUN_TEST(test_selection_setup_and_rejected_artifacts_select_whole_suites);
     RUN_TEST(test_selection_incomplete_global_evidence_never_narrows);
     RUN_TEST(test_selection_inventory_ambiguity_and_conditionals_use_whole_suite);
-    RUN_TEST(test_selection_unregistered_changes_and_unknown_runner_membership_run_all);
+    RUN_TEST(test_model_uncertainty_is_scoped_to_the_suites_of_its_file);
+    RUN_TEST(test_model_only_code_continuations_are_uncertain);
+    RUN_TEST(test_selection_scoped_uncertainty_runs_only_its_suite_whole);
+    RUN_TEST(test_result_scoped_uncertainty_is_not_a_global_run_all);
+    RUN_TEST(test_selection_unregistered_changes_run_all_and_undefined_runner_suites_run_whole);
+    RUN_TEST(test_selection_other_runners_suites_are_outside_the_selection);
     RUN_TEST(test_selection_invalid_evidence_cannot_produce_a_partial_result);
     RUN_TEST(test_selection_is_deterministic_deduplicated_and_owns_strings);
     RUN_TEST(test_selection_proven_empty_diff_is_distinct_from_unresolved_changes);

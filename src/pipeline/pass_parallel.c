@@ -485,9 +485,9 @@ static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def)
      * pass_definitions.c::build_def_props — keep both in sync. */
     const bool is_fn =
         def->label && (strcmp(def->label, "Function") == 0 || strcmp(def->label, "Method") == 0);
-    const char *test_role = def->test_role == CBM_TEST_ROLE_CASE ? ",\"test_role\":\"case\""
+    const char *test_role = def->test_role == CBM_TEST_ROLE_CASE    ? ",\"test_role\":\"case\""
                             : def->test_role == CBM_TEST_ROLE_SUITE ? ",\"test_role\":\"suite\""
-                                                                   : "";
+                                                                    : "";
     int n;
     if (is_fn) {
         n = snprintf(buf, bufsize,
@@ -508,7 +508,8 @@ static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def)
                      "{\"complexity\":%d,\"lines\":%d,\"is_exported\":%s,\"is_test\":%s,"
                      "\"is_entry_point\":%s%s",
                      def->complexity, def->lines, def->is_exported ? "true" : "false",
-                     def->is_test ? "true" : "false", def->is_entry_point ? "true" : "false", test_role);
+                     def->is_test ? "true" : "false", def->is_entry_point ? "true" : "false",
+                     test_role);
     }
     if (n <= 0 || (size_t)n >= bufsize) {
         buf[0] = '\0';
@@ -1249,15 +1250,15 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
          * generated classes are composed before entering the common registry
          * and resolution lifecycle. */
         CBMFileResult *result =
-            cbm_pipeline_test_force_extract_null(ec->pctx, fi->language) ? NULL :
-            fi->language == CBM_LANG_OBJECTSCRIPT_EXPORT
+            cbm_pipeline_test_force_extract_null(ec->pctx, fi->language) ? NULL
+            : fi->language == CBM_LANG_OBJECTSCRIPT_EXPORT
                 ? cbm_pipeline_extract_objectscript_export(source, source_len, ec->project_name,
                                                            fi->rel_path, ec->macro_table,
                                                            ec->return_type_table)
-                : cbm_extract_file_ex_with_tests(
-                      source, source_len, fi->language, ec->project_name, fi->rel_path,
-                      CBM_EXTRACT_BUDGET, NULL, NULL, ec->macro_table,
-                      ec->return_type_table, ec->pctx->test_declarations);
+                : cbm_extract_file_ex_with_tests(source, source_len, fi->language, ec->project_name,
+                                                 fi->rel_path, CBM_EXTRACT_BUDGET, NULL, NULL,
+                                                 ec->macro_table, ec->return_type_table,
+                                                 ec->pctx->test_declarations);
 
         uint64_t file_elapsed_ms = (extract_now_ns() - file_t0) / PP_USEC_PER_MS;
 
@@ -1306,6 +1307,12 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
              * naming the lines helps nobody; see parse_unusable in cbm.h. */
             pp_err_add(errs, fi->rel_path, result->error_ranges ? result->error_ranges : "unknown",
                        result->parse_unusable ? "parse_unusable" : "parse_partial");
+        }
+        if (result->test_declarations_degraded) {
+            /* Degraded per file, not the index; see pass_definitions.c. */
+            pp_err_add(errs, fi->rel_path,
+                       cbm_test_extract_status_message(result->test_declarations_degraded_status),
+                       "test_declarations");
         }
         /* A truncated walk is a coverage gap like a partial parse, and until now
          * it was the only one we kept to ourselves: result->walk_truncated was
@@ -3854,8 +3861,8 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
         }
 
         if (result->has_test_definition_owners &&
-            (!rc->all_defs || rc->def_count <= 0 || !cbm_pxc_has_cross_lsp(lang) ||
-             is_generated || result->lsp_skipped)) {
+            (!rc->all_defs || rc->def_count <= 0 || !cbm_pxc_has_cross_lsp(lang) || is_generated ||
+             result->lsp_skipped)) {
             cbm_pipeline_test_owner_error(result);
             (void)cbm_pipeline_test_result_ok(rc->pctx, result);
             continue;
@@ -3884,7 +3891,8 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
                (jvm_cross_lsp || rust_workspace_cross_lsp || pending_lsp_site ||
                 qualified_lsp_sites < semantic_sites)) ||
               unowned_c_member) &&
-             !is_generated) || result->has_test_definition_owners;
+             !is_generated) ||
+            result->has_test_definition_owners;
 
         /* Skip files with nothing else to resolve and no cross-LSP work. */
         if (result->calls.count == 0 && result->usages.count == 0 && result->throws.count == 0 &&
@@ -4047,7 +4055,7 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
         atomic_fetch_add_explicit(&rc->time_ns_semantic, extract_now_ns() - _ph_t0,
                                   memory_order_relaxed);
 
-resolve_file_cleanup:
+    resolve_file_cleanup:
         cbm_registry_reach_cache_end();
         cbm_registry_import_map_cache_end();
         cbm_registry_resolve_cache_end();

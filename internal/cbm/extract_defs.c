@@ -3,7 +3,7 @@
 #include "helpers.h"
 #include "lang_specs.h"
 #include "foundation/constants.h"
-#include "foundation/log.h"      // cbm_log_error
+#include "foundation/log.h" // cbm_log_error
 #include "discover/test_conventions.h"
 #include "foundation/sha256.h"
 #include "foundation/mem_core.h" // cbm_realloc/cbm_free -- walk_defs stack
@@ -3796,7 +3796,7 @@ static char *resolve_cpp_test_macro_name(CBMArena *a, const char *macro, TSNode 
  * The map lives in traversal scratch; its QNs live in the result arena. */
 struct CBMTestDefinitionMatch {
     uint32_t name_byte;
-    TSNode name_node; /* same raw tree; never retained beyond extraction */
+    TSNode name_node;  /* same raw tree; never retained beyond extraction */
     TSNode scope_node; /* function, or split invocation's compound body */
     uint32_t line;
     int declaration;
@@ -3811,48 +3811,88 @@ typedef struct {
 } TDXRule;
 
 static int tdx_language(const char *name) {
-    if (!name) return 0;
-    if (strcmp(name, "c") == 0 || strcmp(name, "C") == 0) return 1;
-    if (strcmp(name, "cpp") == 0 || strcmp(name, "c++") == 0 ||
-        strcmp(name, "C++") == 0) return 2;
-    if (strcmp(name, "cuda") == 0 || strcmp(name, "CUDA") == 0) return 3;
+    if (!name)
+        return 0;
+    if (strcmp(name, "c") == 0 || strcmp(name, "C") == 0)
+        return 1;
+    if (strcmp(name, "cpp") == 0 || strcmp(name, "c++") == 0 || strcmp(name, "C++") == 0)
+        return 2;
+    if (strcmp(name, "cuda") == 0 || strcmp(name, "CUDA") == 0)
+        return 3;
     return 0;
 }
 
 static int tdx_source_language(CBMLanguage language) {
-    return language == CBM_LANG_C ? 1 : language == CBM_LANG_CPP ? 2 :
-           language == CBM_LANG_CUDA ? 3 : 0;
+    return language == CBM_LANG_C      ? 1
+           : language == CBM_LANG_CPP  ? 2
+           : language == CBM_LANG_CUDA ? 3
+                                       : 0;
 }
 
-static bool tdx_issue(CBMFileResult *result, CBMTestExtractStatus status,
-                      int declaration, uint32_t line) {
-    if (result->test_declarations_status == CBM_TEST_EXTRACT_OOM) return false;
-    bool earlier = result->test_declarations_status == CBM_TEST_EXTRACT_OK ||
-                   status == CBM_TEST_EXTRACT_OOM || line < result->test_declaration_line ||
-                   (line == result->test_declaration_line &&
-                    (declaration < result->test_declaration_index ||
-                     (declaration == result->test_declaration_index &&
-                      status < result->test_declarations_status)));
-    if (!earlier) return false;
-    static const char *const messages[] = {
-        "", "unsupported configured definition language",
-        "unsupported disabled native test preset", "unsupported configured definition name",
-        "configured definition argument is missing", "configured definition argument is not an identifier",
-        "ambiguous configured definition mapping", "unsupported configured definition form",
-        "configured definition allocation failed"
-    };
+const char *cbm_test_extract_status_message(CBMTestExtractStatus status) {
+    static const char *const messages[] = {"",
+                                           "unsupported configured definition language",
+                                           "unsupported disabled native test preset",
+                                           "unsupported configured definition name",
+                                           "configured definition argument is missing",
+                                           "configured definition argument is not an identifier",
+                                           "ambiguous configured definition mapping",
+                                           "unsupported configured definition form",
+                                           "configured definition allocation failed"};
+    size_t count = sizeof(messages) / sizeof(messages[0]);
+    return (size_t)status < count ? messages[status] : "configured definition issue";
+}
+
+static bool tdx_issue(CBMFileResult *result, CBMTestExtractStatus status, int declaration,
+                      uint32_t line) {
+    if (result->test_declarations_status == CBM_TEST_EXTRACT_OOM)
+        return false;
+    bool earlier =
+        result->test_declarations_status == CBM_TEST_EXTRACT_OK || status == CBM_TEST_EXTRACT_OOM ||
+        line < result->test_declaration_line ||
+        (line == result->test_declaration_line && (declaration < result->test_declaration_index ||
+                                                   (declaration == result->test_declaration_index &&
+                                                    status < result->test_declarations_status)));
+    if (!earlier)
+        return false;
+    if (!result->has_error)
+        result->test_error_only = true;
+
     result->has_error = true;
     result->test_declarations_status = status;
     result->test_declaration_index = declaration;
     result->test_declaration_line = line;
-    result->error_msg = cbm_arena_strdup(&result->arena, messages[status]);
-    if (!result->error_msg) result->test_declarations_status = CBM_TEST_EXTRACT_OOM;
+    result->error_msg = cbm_arena_strdup(&result->arena, cbm_test_extract_status_message(status));
+    if (!result->error_msg)
+        result->test_declarations_status = CBM_TEST_EXTRACT_OOM;
     return false;
+}
+
+void cbm_test_declarations_degrade(CBMFileResult *result) {
+    if (!result || result->test_declarations_status == CBM_TEST_EXTRACT_OK ||
+        result->test_declarations_status == CBM_TEST_EXTRACT_OOM)
+        return;
+    result->test_declarations_degraded = true;
+    result->test_declarations_degraded_status = result->test_declarations_status;
+    for (int i = 0; i < result->defs.count; i++) {
+        CBMDefinition *def = &result->defs.items[i];
+        def->test_role = CBM_TEST_ROLE_NONE;
+        def->test_name_start_byte = def->test_name_end_byte = 0;
+        def->test_body_start_byte = def->test_body_end_byte = 0;
+    }
+    result->has_test_definition_owners = false;
+    result->test_declarations_status = CBM_TEST_EXTRACT_OK;
+    if (result->test_error_only) {
+        result->has_error = false;
+        result->error_msg = NULL;
+        result->test_error_only = false;
+    }
 }
 
 bool cbm_test_declarations_validate(CBMFileResult *result,
                                     const cbm_test_declarations_t *declarations) {
-    if (!declarations) return true;
+    if (!declarations)
+        return true;
     for (int i = 0; i < CBM_TEST_PRESET_COUNT; i++) {
         bool enabled = false;
         if (!cbm_test_declarations_preset(declarations, (cbm_test_preset_t)i, &enabled))
@@ -3864,7 +3904,8 @@ bool cbm_test_declarations_validate(CBMFileResult *result,
     const cbm_test_declaration_t *items = cbm_test_declarations_items(declarations, &count);
     for (int i = 0; i < count; i++) {
         const cbm_test_declaration_t *rule = &items[i];
-        if (rule->role != CBM_TEST_DECL_CASE && rule->role != CBM_TEST_DECL_SUITE) continue;
+        if (rule->role != CBM_TEST_DECL_CASE && rule->role != CBM_TEST_DECL_SUITE)
+            continue;
         if (!tdx_language(rule->language))
             tdx_issue(result, CBM_TEST_EXTRACT_UNSUPPORTED_LANGUAGE, i, 0);
         if (rule->name_arg_count != 1 || !rule->name_args || rule->name_args[0] < 0)
@@ -3874,7 +3915,8 @@ bool cbm_test_declarations_validate(CBMFileResult *result,
 }
 
 static bool tdx_preset(const CBMExtractCtx *ctx, cbm_test_preset_t preset) {
-    if (!ctx->test_declarations) return preset != CBM_TEST_PRESET_C_CBM;
+    if (!ctx->test_declarations)
+        return preset != CBM_TEST_PRESET_C_CBM;
     bool enabled = false;
     return cbm_test_declarations_preset(ctx->test_declarations, preset, &enabled) && enabled;
 }
@@ -3883,12 +3925,14 @@ static bool tdx_equal(const char *name, const char *text, size_t size) {
     return name && strlen(name) == size && memcmp(name, text, size) == 0;
 }
 
-static bool tdx_match(CBMExtractCtx *ctx, const char *text, size_t size,
-                      uint32_t line, TDXRule *chosen) {
+static bool tdx_match(CBMExtractCtx *ctx, const char *text, size_t size, uint32_t line,
+                      TDXRule *chosen) {
     *chosen = (TDXRule){.argument = -1, .declaration = -1};
-    if (!ctx->test_declarations || !ctx->test_declarations_raw_source) return false;
+    if (!ctx->test_declarations || !ctx->test_declarations_raw_source)
+        return false;
     int language = tdx_source_language(ctx->language), count = 0;
-    if (!language) return false;
+    if (!language)
+        return false;
     const cbm_test_declaration_t *items =
         cbm_test_declarations_items(ctx->test_declarations, &count);
     bool matched = false, valid = true;
@@ -3897,8 +3941,8 @@ static bool tdx_match(CBMExtractCtx *ctx, const char *text, size_t size,
         if ((rule->role != CBM_TEST_DECL_CASE && rule->role != CBM_TEST_DECL_SUITE) ||
             tdx_language(rule->language) != language || !tdx_equal(rule->define_macro, text, size))
             continue;
-        CBMTestDefinitionRole role = rule->role == CBM_TEST_DECL_CASE ?
-                                     CBM_TEST_ROLE_CASE : CBM_TEST_ROLE_SUITE;
+        CBMTestDefinitionRole role =
+            rule->role == CBM_TEST_DECL_CASE ? CBM_TEST_ROLE_CASE : CBM_TEST_ROLE_SUITE;
         if (rule->name_arg_count != 1 || !rule->name_args || rule->name_args[0] < 0) {
             tdx_issue(ctx->result, CBM_TEST_EXTRACT_UNSUPPORTED_NAME, i, line);
             valid = false;
@@ -3909,19 +3953,21 @@ static bool tdx_match(CBMExtractCtx *ctx, const char *text, size_t size,
             tdx_issue(ctx->result, CBM_TEST_EXTRACT_AMBIGUOUS, i, line);
             valid = false;
         }
-        if (!matched) *chosen = (TDXRule){role, rule->name_args[0], i, true};
+        if (!matched)
+            *chosen = (TDXRule){role, rule->name_args[0], i, true};
         matched = true;
     }
     if (language == 1 && tdx_preset(ctx, CBM_TEST_PRESET_C_CBM)) {
-        CBMTestDefinitionRole role = tdx_equal("TEST", text, size) ? CBM_TEST_ROLE_CASE :
-                                     tdx_equal("SUITE", text, size) ? CBM_TEST_ROLE_SUITE :
-                                     CBM_TEST_ROLE_NONE;
+        CBMTestDefinitionRole role = tdx_equal("TEST", text, size)    ? CBM_TEST_ROLE_CASE
+                                     : tdx_equal("SUITE", text, size) ? CBM_TEST_ROLE_SUITE
+                                                                      : CBM_TEST_ROLE_NONE;
         if (role != CBM_TEST_ROLE_NONE) {
             if (matched && (chosen->role != role || chosen->argument != 0)) {
                 tdx_issue(ctx->result, CBM_TEST_EXTRACT_AMBIGUOUS, -1, line);
                 valid = false;
             }
-            if (!matched) *chosen = (TDXRule){role, 0, -1, true};
+            if (!matched)
+                *chosen = (TDXRule){role, 0, -1, true};
             matched = true;
         }
     }
@@ -3957,7 +4003,10 @@ static bool tdx_pp_number(const char *s, size_t n, size_t *at) {
     i++;
     while (i < n) {
         unsigned char c = (unsigned char)s[i];
-        if (tdx_ident(c) || c == '.') { i++; continue; }
+        if (tdx_ident(c) || c == '.') {
+            i++;
+            continue;
+        }
         if (c == '\'' && i + 1 < n && tdx_ident((unsigned char)s[i + 1])) {
             i += 2;
             continue;
@@ -3986,38 +4035,51 @@ static bool tdx_splice(const char *s, size_t n, size_t at) {
  * line splicing/raw strings are explicit uncertainty, not token guesses. */
 static bool tdx_trivia(const char *s, size_t n, size_t *at) {
     for (;;) {
-        while (*at < n && tdx_space((unsigned char)s[*at])) (*at)++;
-        if (*at + 1 >= n || s[*at] != '/') return true;
+        while (*at < n && tdx_space((unsigned char)s[*at]))
+            (*at)++;
+        if (*at + 1 >= n || s[*at] != '/')
+            return true;
         if (s[*at + 1] == '/') {
             *at += 2;
             while (*at < n && s[*at] != '\n') {
-                if (tdx_splice(s, n, *at)) return false;
+                if (tdx_splice(s, n, *at))
+                    return false;
                 (*at)++;
             }
         } else if (s[*at + 1] == '*') {
             *at += 2;
             while (*at + 1 < n && !(s[*at] == '*' && s[*at + 1] == '/')) {
-                if (tdx_splice(s, n, *at)) return false;
+                if (tdx_splice(s, n, *at))
+                    return false;
                 (*at)++;
             }
-            if (*at + 1 >= n) return false;
+            if (*at + 1 >= n)
+                return false;
             *at += 2;
-        } else return true;
+        } else
+            return true;
     }
 }
 
 static bool tdx_literal(const char *s, size_t n, size_t *at) {
     char quote = s[*at];
-    if (quote == '"' && *at && s[*at - 1] == 'R') return false;
+    if (quote == '"' && *at && s[*at - 1] == 'R')
+        return false;
     (*at)++;
     while (*at < n) {
         char c = s[*at];
-        if (c == quote) { (*at)++; return true; }
-        if (c == '\0' || c == '\n' || c == '\r' || tdx_splice(s, n, *at)) return false;
+        if (c == quote) {
+            (*at)++;
+            return true;
+        }
+        if (c == '\0' || c == '\n' || c == '\r' || tdx_splice(s, n, *at))
+            return false;
         if (c == '\\') {
-            if (*at + 1 >= n) return false;
+            if (*at + 1 >= n)
+                return false;
             *at += 2;
-        } else (*at)++;
+        } else
+            (*at)++;
     }
     return false;
 }
@@ -4025,7 +4087,8 @@ static bool tdx_literal(const char *s, size_t n, size_t *at) {
 /* The audit skips complete raw strings outside consumed invocations. The
  * invocation adapter remains deliberately stricter (tdx_literal above). */
 static bool tdx_audit_literal(const char *s, size_t n, size_t *at) {
-    if (s[*at] != '"' || !*at || s[*at - 1] != 'R') return tdx_literal(s, n, at);
+    if (s[*at] != '"' || !*at || s[*at - 1] != 'R')
+        return tdx_literal(s, n, at);
     size_t delimiter = *at + 1, open = delimiter;
     while (open < n && s[open] != '(') {
         unsigned char c = (unsigned char)s[open];
@@ -4033,12 +4096,12 @@ static bool tdx_audit_literal(const char *s, size_t n, size_t *at) {
             return false;
         open++;
     }
-    if (open == n) return false;
+    if (open == n)
+        return false;
     size_t length = open - delimiter;
     for (size_t end = open + 1; end < n; end++) {
         if (s[end] == ')' && length + 2 <= n - end &&
-            memcmp(s + end + 1, s + delimiter, length) == 0 &&
-            s[end + length + 1] == '"') {
+            memcmp(s + end + 1, s + delimiter, length) == 0 && s[end + length + 1] == '"') {
             *at = end + length + 2;
             return true;
         }
@@ -4046,9 +4109,8 @@ static bool tdx_audit_literal(const char *s, size_t n, size_t *at) {
     return false;
 }
 
-static bool tdx_argument(CBMExtractCtx *ctx, size_t at, int wanted,
-                         size_t *name_at, size_t *name_length, size_t *after,
-                         const TDXRule *rule, uint32_t line) {
+static bool tdx_argument(CBMExtractCtx *ctx, size_t at, int wanted, size_t *name_at,
+                         size_t *name_length, size_t *after, const TDXRule *rule, uint32_t line) {
     const char *s = ctx->source;
     size_t n = (size_t)ctx->source_len;
     if (!tdx_trivia(s, n, &at) || at >= n || s[at] != '(')
@@ -4058,21 +4120,28 @@ static bool tdx_argument(CBMExtractCtx *ctx, size_t at, int wanted,
     int argument = 0;
     bool selected = false, closed = false;
     while (at < n && depth) {
-        if (!tdx_trivia(s, n, &at) || at >= n || s[at] == '\0' || tdx_splice(s, n, at)) break;
-        if (tdx_pp_number(s, n, &at)) continue;
+        if (!tdx_trivia(s, n, &at) || at >= n || s[at] == '\0' || tdx_splice(s, n, at))
+            break;
+        if (tdx_pp_number(s, n, &at))
+            continue;
         char c = s[at];
         if (c == '"' || c == '\'') {
-            if (!tdx_literal(s, n, &at)) break;
+            if (!tdx_literal(s, n, &at))
+                break;
             continue;
         }
         if (c == '(' || c == '[' || c == '{') {
-            if (depth == sizeof(closing)) break;
+            if (depth == sizeof(closing))
+                break;
             closing[depth++] = c == '(' ? ')' : c == '[' ? ']' : '}';
         } else if (c == ')' || c == ']' || c == '}') {
-            if (c != closing[depth - 1]) break;
+            if (c != closing[depth - 1])
+                break;
             if (--depth == 0) {
                 if (argument == wanted) {
-                    selected_begin = begin; selected_end = at; selected = true;
+                    selected_begin = begin;
+                    selected_end = at;
+                    selected = true;
                 }
                 *after = at + 1;
                 closed = true;
@@ -4080,7 +4149,9 @@ static bool tdx_argument(CBMExtractCtx *ctx, size_t at, int wanted,
             }
         } else if (c == ',' && depth == 1) {
             if (argument == wanted) {
-                selected_begin = begin; selected_end = at; selected = true;
+                selected_begin = begin;
+                selected_end = at;
+                selected = true;
             }
             argument++;
             begin = at + 1;
@@ -4095,12 +4166,15 @@ static bool tdx_argument(CBMExtractCtx *ctx, size_t at, int wanted,
     if (!tdx_trivia(s, selected_end, &at) || at == selected_end)
         return tdx_issue(ctx->result, CBM_TEST_EXTRACT_MISSING_ARGUMENT, rule->declaration, line);
     if (!tdx_ident_first((unsigned char)s[at]))
-        return tdx_issue(ctx->result, CBM_TEST_EXTRACT_UNSUPPORTED_ARGUMENT, rule->declaration, line);
+        return tdx_issue(ctx->result, CBM_TEST_EXTRACT_UNSUPPORTED_ARGUMENT, rule->declaration,
+                         line);
     *name_at = at++;
-    while (at < selected_end && tdx_ident((unsigned char)s[at])) at++;
+    while (at < selected_end && tdx_ident((unsigned char)s[at]))
+        at++;
     *name_length = at - *name_at;
     if (!tdx_trivia(s, selected_end, &at) || at != selected_end)
-        return tdx_issue(ctx->result, CBM_TEST_EXTRACT_UNSUPPORTED_ARGUMENT, rule->declaration, line);
+        return tdx_issue(ctx->result, CBM_TEST_EXTRACT_UNSUPPORTED_ARGUMENT, rule->declaration,
+                         line);
     return true;
 }
 
@@ -4160,12 +4234,14 @@ bool cbm_test_definition_candidate(TSNode scope, CBMLanguage language, TSNode *n
 static bool tdx_observe(CBMExtractCtx *ctx, TSNode name_node, TSNode scope_node, const char *qn,
                         const TDXRule *rule);
 
-static bool tdx_resolve(CBMExtractCtx *ctx, TSNode node, TSNode name_node,
-                        const char *macro, const char **name, TDXRule *rule) {
+static bool tdx_resolve(CBMExtractCtx *ctx, TSNode node, TSNode name_node, const char *macro,
+                        const char **name, TDXRule *rule) {
     *name = NULL;
     uint32_t line = ts_node_start_point(name_node).row + 1;
-    if (!tdx_match(ctx, macro, strlen(macro), line, rule)) return false;
-    if (ctx->result->test_declarations_status == CBM_TEST_EXTRACT_OOM) return true;
+    if (!tdx_match(ctx, macro, strlen(macro), line, rule))
+        return false;
+    if (ctx->result->test_declarations_status == CBM_TEST_EXTRACT_OOM)
+        return true;
     if (!tdx_observe(ctx, name_node, node, NULL, rule) || !rule->valid)
         return true;
     uint32_t end = ts_node_end_byte(name_node);
@@ -4174,7 +4250,8 @@ static bool tdx_resolve(CBMExtractCtx *ctx, TSNode node, TSNode name_node,
         tdx_issue(ctx->result, CBM_TEST_EXTRACT_UNSUPPORTED_FORM, rule->declaration, line);
         return true;
     }
-    if (!tdx_argument(ctx, end, rule->argument, &id_at, &id_length, &after, rule, line)) return true;
+    if (!tdx_argument(ctx, end, rule->argument, &id_at, &id_length, &after, rule, line))
+        return true;
     TSNode candidate_name, body;
     if (!cbm_test_definition_candidate(node, ctx->language, &candidate_name, &body) ||
         !ts_node_eq(candidate_name, name_node)) {
@@ -4182,16 +4259,16 @@ static bool tdx_resolve(CBMExtractCtx *ctx, TSNode node, TSNode name_node,
         return true;
     }
     if (!tdx_trivia(ctx->source, (size_t)ctx->source_len, &after) ||
-        after >= (size_t)ctx->source_len || ctx->source[after] != '{' ||
-        ts_node_is_null(body) || ts_node_has_error(body) || ts_node_is_missing(body) ||
-        ts_node_start_byte(body) != after || ts_node_end_byte(body) <= after ||
-        ts_node_end_byte(body) > (uint32_t)ctx->source_len ||
+        after >= (size_t)ctx->source_len || ctx->source[after] != '{' || ts_node_is_null(body) ||
+        ts_node_has_error(body) || ts_node_is_missing(body) || ts_node_start_byte(body) != after ||
+        ts_node_end_byte(body) <= after || ts_node_end_byte(body) > (uint32_t)ctx->source_len ||
         ctx->source[ts_node_end_byte(body) - 1] != '}') {
         tdx_issue(ctx->result, CBM_TEST_EXTRACT_UNSUPPORTED_FORM, rule->declaration, line);
         return true;
     }
     *name = cbm_arena_sprintf(ctx->arena, "%s_%.*s", macro, (int)id_length, ctx->source + id_at);
-    if (!*name) tdx_issue(ctx->result, CBM_TEST_EXTRACT_OOM, rule->declaration, line);
+    if (!*name)
+        tdx_issue(ctx->result, CBM_TEST_EXTRACT_OOM, rule->declaration, line);
     return true;
 }
 
@@ -4205,7 +4282,8 @@ static bool tdx_observe(CBMExtractCtx *ctx, TSNode name_node, TSNode scope_node,
     for (int i = 0; i < count; i++) {
         struct CBMTestDefinitionMatch *match = &ctx->test_definition_matches[i];
         if (ts_node_eq(match->name_node, name_node)) {
-            if (qn) match->qn = qn;
+            if (qn)
+                match->qn = qn;
             return true;
         }
     }
@@ -4219,8 +4297,10 @@ static bool tdx_observe(CBMExtractCtx *ctx, TSNode name_node, TSNode scope_node,
         CBMArena *scratch = ctx->scratch ? ctx->scratch : ctx->arena;
         struct CBMTestDefinitionMatch *items =
             cbm_arena_alloc(scratch, (size_t)next * sizeof(*items));
-        if (!items) return tdx_issue(ctx->result, CBM_TEST_EXTRACT_OOM, rule->declaration, line);
-        if (count) memcpy(items, ctx->test_definition_matches, (size_t)count * sizeof(*items));
+        if (!items)
+            return tdx_issue(ctx->result, CBM_TEST_EXTRACT_OOM, rule->declaration, line);
+        if (count)
+            memcpy(items, ctx->test_definition_matches, (size_t)count * sizeof(*items));
         ctx->test_definition_matches = items;
         ctx->test_definition_match_cap = next;
     }
@@ -4232,7 +4312,8 @@ static bool tdx_observe(CBMExtractCtx *ctx, TSNode name_node, TSNode scope_node,
 
 const char *cbm_test_definition_qn(CBMExtractCtx *ctx, TSNode function) {
     if (!ctx->test_declarations_raw_source || ctx->test_definition_match_count == 0 ||
-        ts_node_is_null(function)) return NULL;
+        ts_node_is_null(function))
+        return NULL;
     for (int i = 0; i < ctx->test_definition_match_count; i++)
         if (ts_node_eq(ctx->test_definition_matches[i].scope_node, function))
             return ctx->test_definition_matches[i].qn;
@@ -4243,13 +4324,17 @@ const char *cbm_test_definition_qn(CBMExtractCtx *ctx, TSNode function) {
  * A local digest is identity evidence only, never artifact authentication. */
 bool cbm_test_definition_owners_match(const CBMFileResult *owners, const char *source,
                                       int source_len, bool cpp_mode, const char *module_qn) {
-    if (!owners) return true;
-    if (owners->test_declarations_status != CBM_TEST_EXTRACT_OK) return false;
-    if (!owners->has_test_definition_owners) return true;
-    if (!source || source_len < 0 || source_len != owners->test_owner_source_len ||
-        !module_qn || !owners->module_qn || strcmp(module_qn, owners->module_qn) != 0 ||
+    if (!owners)
+        return true;
+    if (owners->test_declarations_status != CBM_TEST_EXTRACT_OK)
+        return false;
+    if (!owners->has_test_definition_owners)
+        return true;
+    if (!source || source_len < 0 || source_len != owners->test_owner_source_len || !module_qn ||
+        !owners->module_qn || strcmp(module_qn, owners->module_qn) != 0 ||
         !tdx_source_language(owners->test_owner_language) ||
-        cpp_mode != (owners->test_owner_language != CBM_LANG_C)) return false;
+        cpp_mode != (owners->test_owner_language != CBM_LANG_C))
+        return false;
     char digest[65];
     cbm_sha256_hex(source, (size_t)source_len, digest);
     return memcmp(digest, owners->test_owner_source_sha256, sizeof(digest)) == 0;
@@ -4259,7 +4344,8 @@ bool cbm_test_definition_owners_match(const CBMFileResult *owners, const char *s
  * Exact name AND body spans distinguish nodes, including nested definitions;
  * never infer an owner from a line window or a guessed macro name. */
 const char *cbm_test_definition_owner_qn(const CBMFileResult *owners, TSNode function) {
-    if (!owners || !owners->has_test_definition_owners || ts_node_is_null(function)) return NULL;
+    if (!owners || !owners->has_test_definition_owners || ts_node_is_null(function))
+        return NULL;
     TSNode name, body;
     if (!cbm_test_definition_candidate(function, owners->test_owner_language, &name, &body) ||
         ts_node_is_null(body))
@@ -4271,8 +4357,10 @@ const char *cbm_test_definition_owner_qn(const CBMFileResult *owners, TSNode fun
             def->test_name_start_byte != ts_node_start_byte(name) ||
             def->test_name_end_byte != ts_node_end_byte(name) ||
             def->test_body_start_byte != ts_node_start_byte(body) ||
-            def->test_body_end_byte != ts_node_end_byte(body)) continue;
-        if (found) return NULL; /* duplicate rows are rejected by finish */
+            def->test_body_end_byte != ts_node_end_byte(body))
+            continue;
+        if (found)
+            return NULL; /* duplicate rows are rejected by finish */
         found = def->qualified_name;
     }
     return found;
@@ -4283,28 +4371,38 @@ const char *cbm_test_definition_owner_qn(const CBMFileResult *owners, TSNode fun
  * removed. This locates its extent; tdx_directive validates consumed content. */
 static bool tdx_directive_end(const char *s, size_t n, size_t *at, uint32_t *line) {
     while (*at < n) {
-        if (s[*at] == '\0') return false;
-        if (s[*at] == '\n') { (*at)++; (*line)++; return true; }
+        if (s[*at] == '\0')
+            return false;
+        if (s[*at] == '\n') {
+            (*at)++;
+            (*line)++;
+            return true;
+        }
         if (*at + 1 < n && s[*at] == '/' && s[*at + 1] == '*') {
             *at += 2;
             while (*at + 1 < n && !(s[*at] == '*' && s[*at + 1] == '/')) {
-                if (s[*at] == '\0') return false;
-                if (s[*at] == '\n') (*line)++;
+                if (s[*at] == '\0')
+                    return false;
+                if (s[*at] == '\n')
+                    (*line)++;
                 (*at)++;
             }
-            if (*at + 1 >= n) return false;
+            if (*at + 1 >= n)
+                return false;
             *at += 2;
             continue;
         }
         if (*at + 1 < n && s[*at] == '/' && s[*at + 1] == '/') {
             *at += 2;
             while (*at < n && s[*at] != '\n') {
-                if (s[*at] == '\0') return false;
+                if (s[*at] == '\0')
+                    return false;
                 (*at)++;
             }
             continue;
         }
-        if (tdx_pp_number(s, n, at)) continue;
+        if (tdx_pp_number(s, n, at))
+            continue;
         if (s[*at] == '"' || s[*at] == '\'') {
             size_t before = *at;
             if (!tdx_audit_literal(s, n, at)) {
@@ -4312,11 +4410,14 @@ static bool tdx_directive_end(const char *s, size_t n, size_t *at, uint32_t *lin
                  * content. Do not reinterpret its comment punctuation here. */
                 *at = before + 1;
                 while (*at < n && s[*at] != '\n') {
-                    if (s[*at] == '\0') return false;
+                    if (s[*at] == '\0')
+                        return false;
                     (*at)++;
                 }
             }
-            for (size_t i = before; i < *at; i++) if (s[i] == '\n') (*line)++;
+            for (size_t i = before; i < *at; i++)
+                if (s[i] == '\n')
+                    (*line)++;
             continue;
         }
         (*at)++;
@@ -4334,7 +4435,10 @@ static void tdx_directive(CBMExtractCtx *ctx, size_t begin, size_t end, uint32_t
      * the joined bytes never become declaration or graph source evidence. */
     bool spliced = false;
     for (size_t i = 0; i < end; i++)
-        if (tdx_splice(s, end, i)) { spliced = true; break; }
+        if (tdx_splice(s, end, i)) {
+            spliced = true;
+            break;
+        }
     if (spliced) {
         CBMArena *scratch = ctx->scratch ? ctx->scratch : ctx->arena;
         char *joined = cbm_arena_alloc(scratch, end + 1);
@@ -4344,8 +4448,10 @@ static void tdx_directive(CBMExtractCtx *ctx, size_t begin, size_t end, uint32_t
         }
         size_t used = 0;
         for (size_t i = 0; i < end;) {
-            if (tdx_splice(s, end, i)) i += s[i + 1] == '\r' ? 3 : 2;
-            else joined[used++] = s[i++];
+            if (tdx_splice(s, end, i))
+                i += s[i + 1] == '\r' ? 3 : 2;
+            else
+                joined[used++] = s[i++];
         }
         joined[used] = '\0';
         s = joined;
@@ -4357,16 +4463,20 @@ static void tdx_directive(CBMExtractCtx *ctx, size_t begin, size_t end, uint32_t
         return;
     }
     size_t word = at;
-    while (at < end && tdx_ident((unsigned char)s[at])) at++;
-    if (!tdx_equal("define", s + word, at - word)) return;
+    while (at < end && tdx_ident((unsigned char)s[at]))
+        at++;
+    if (!tdx_equal("define", s + word, at - word))
+        return;
     if (!tdx_trivia(s, end, &at) || at == end || !tdx_ident_first((unsigned char)s[at])) {
         tdx_issue(ctx->result, CBM_TEST_EXTRACT_UNSUPPORTED_FORM, -1, line);
         return;
     }
-    while (at < end && tdx_ident((unsigned char)s[at])) at++;
+    while (at < end && tdx_ident((unsigned char)s[at]))
+        at++;
     /* A function-like macro's formal parameters are not its replacement. */
     if (at < end && s[at] == '(') {
-        while (at < end && s[at] != ')') at++;
+        while (at < end && s[at] != ')')
+            at++;
         if (at == end) {
             tdx_issue(ctx->result, CBM_TEST_EXTRACT_UNSUPPORTED_FORM, -1, line);
             return;
@@ -4374,13 +4484,18 @@ static void tdx_directive(CBMExtractCtx *ctx, size_t begin, size_t end, uint32_t
         at++;
     }
     while (at < end) {
-        if (tdx_splice(s, end, at)) { at += s[at + 1] == '\r' ? 3 : 2; continue; }
+        if (tdx_splice(s, end, at)) {
+            at += s[at + 1] == '\r' ? 3 : 2;
+            continue;
+        }
         if (!tdx_trivia(s, end, &at)) {
             tdx_issue(ctx->result, CBM_TEST_EXTRACT_UNSUPPORTED_FORM, -1, line);
             return;
         }
-        if (at == end) return;
-        if (tdx_pp_number(s, end, &at)) continue;
+        if (at == end)
+            return;
+        if (tdx_pp_number(s, end, &at))
+            continue;
         if (s[at] == '"' || s[at] == '\'') {
             if (!tdx_audit_literal(s, end, &at)) {
                 tdx_issue(ctx->result, CBM_TEST_EXTRACT_UNSUPPORTED_FORM, -1, line);
@@ -4388,9 +4503,13 @@ static void tdx_directive(CBMExtractCtx *ctx, size_t begin, size_t end, uint32_t
             }
             continue;
         }
-        if (!tdx_ident_first((unsigned char)s[at])) { at++; continue; }
+        if (!tdx_ident_first((unsigned char)s[at])) {
+            at++;
+            continue;
+        }
         word = at++;
-        while (at < end && tdx_ident((unsigned char)s[at])) at++;
+        while (at < end && tdx_ident((unsigned char)s[at]))
+            at++;
         TDXRule rule;
         if (tdx_match(ctx, s + word, at - word, line, &rule))
             tdx_issue(ctx->result, CBM_TEST_EXTRACT_UNSUPPORTED_FORM, rule.declaration, line);
@@ -4399,16 +4518,19 @@ static void tdx_directive(CBMExtractCtx *ctx, size_t begin, size_t end, uint32_t
 
 void cbm_test_declarations_finish(CBMExtractCtx *ctx) {
     if (!ctx->test_declarations || !ctx->test_declarations_raw_source ||
-        ctx->result->test_declarations_status == CBM_TEST_EXTRACT_OOM) return;
+        ctx->result->test_declarations_status == CBM_TEST_EXTRACT_OOM)
+        return;
     int language = tdx_source_language(ctx->language), count = 0;
-    if (!language) return;
+    if (!language)
+        return;
     const cbm_test_declaration_t *items =
         cbm_test_declarations_items(ctx->test_declarations, &count);
     bool active = language == 1 && tdx_preset(ctx, CBM_TEST_PRESET_C_CBM);
     for (int i = 0; i < count && !active; i++)
         active = (items[i].role == CBM_TEST_DECL_CASE || items[i].role == CBM_TEST_DECL_SUITE) &&
                  tdx_language(items[i].language) == language;
-    if (!active) return;
+    if (!active)
+        return;
     /* Detect configured invocations dropped by a grammar/error region. Never
      * invent definitions here; an unmatched raw invocation is uncertainty.
      * Normalize line splices for AUDIT ONLY, so a split macro cannot disappear.
@@ -4420,8 +4542,10 @@ void cbm_test_declarations_finish(CBMExtractCtx *ctx) {
     size_t n = ctx->source_len > 0 ? (size_t)ctx->source_len : 0, at = 0;
     uint32_t splice_line = 0, physical_line = 1;
     for (size_t i = 0; i < n; i++) {
-        if (!splice_line && tdx_splice(s, n, i)) splice_line = physical_line;
-        if (s[i] == '\n') physical_line++;
+        if (!splice_line && tdx_splice(s, n, i))
+            splice_line = physical_line;
+        if (s[i] == '\n')
+            physical_line++;
     }
     if (splice_line) {
         CBMArena *scratch = ctx->scratch ? ctx->scratch : ctx->arena;
@@ -4432,8 +4556,10 @@ void cbm_test_declarations_finish(CBMExtractCtx *ctx) {
         }
         size_t used = 0;
         for (size_t i = 0; i < n;) {
-            if (tdx_splice(s, n, i)) i += s[i + 1] == '\r' ? 3 : 2;
-            else joined[used++] = s[i++];
+            if (tdx_splice(s, n, i))
+                i += s[i + 1] == '\r' ? 3 : 2;
+            else
+                joined[used++] = s[i++];
         }
         joined[used] = '\0';
         s = joined;
@@ -4446,10 +4572,21 @@ void cbm_test_declarations_finish(CBMExtractCtx *ctx) {
     bool line_start = true;
     while (at < n) {
         size_t before = at;
-        if (!tdx_trivia(s, n, &at)) { uncertain_line = line; break; }
-        for (size_t i = before; i < at; i++) if (s[i] == '\n') { line++; line_start = true; }
-        if (at == n) break;
-        if (s[at] == '\0') { uncertain_line = line; break; }
+        if (!tdx_trivia(s, n, &at)) {
+            uncertain_line = line;
+            break;
+        }
+        for (size_t i = before; i < at; i++)
+            if (s[i] == '\n') {
+                line++;
+                line_start = true;
+            }
+        if (at == n)
+            break;
+        if (s[at] == '\0') {
+            uncertain_line = line;
+            break;
+        }
         if (line_start && s[at] == '#') {
             size_t directive_begin = at;
             uint32_t directive_line = splice_line ? splice_line : line;
@@ -4462,26 +4599,44 @@ void cbm_test_declarations_finish(CBMExtractCtx *ctx) {
             continue;
         }
         line_start = false;
-        if (tdx_pp_number(s, n, &at)) continue;
+        if (tdx_pp_number(s, n, &at))
+            continue;
         if (s[at] == '"' || s[at] == '\'') {
             before = at;
-            if (!tdx_audit_literal(s, n, &at)) { uncertain_line = line; break; }
-            for (size_t i = before; i < at; i++) if (s[i] == '\n') line++;
+            if (!tdx_audit_literal(s, n, &at)) {
+                uncertain_line = line;
+                break;
+            }
+            for (size_t i = before; i < at; i++)
+                if (s[i] == '\n')
+                    line++;
             continue;
         }
-        if (!tdx_ident_first((unsigned char)s[at])) { at++; continue; }
+        if (!tdx_ident_first((unsigned char)s[at])) {
+            at++;
+            continue;
+        }
         size_t begin = at++;
-        while (at < n && tdx_ident((unsigned char)s[at])) at++;
+        while (at < n && tdx_ident((unsigned char)s[at]))
+            at++;
         size_t after = at;
-        if (!tdx_trivia(s, n, &after)) { uncertain_line = line; break; }
-        if (after == n || s[after] != '(') continue;
+        if (!tdx_trivia(s, n, &after)) {
+            uncertain_line = line;
+            break;
+        }
+        if (after == n || s[after] != '(')
+            continue;
         TDXRule rule;
         uint32_t issue_line = splice_line ? splice_line : line;
-        if (!tdx_match(ctx, s + begin, at - begin, issue_line, &rule)) continue;
+        if (!tdx_match(ctx, s + begin, at - begin, issue_line, &rule))
+            continue;
         bool found = false;
         if (!splice_line) {
             for (int i = 0; i < ctx->test_definition_match_count; i++)
-                if (ctx->test_definition_matches[i].name_byte == begin) { found = true; break; }
+                if (ctx->test_definition_matches[i].name_byte == begin) {
+                    found = true;
+                    break;
+                }
         }
         if (!found)
             tdx_issue(ctx->result, CBM_TEST_EXTRACT_UNSUPPORTED_FORM, rule.declaration, issue_line);
@@ -4492,11 +4647,13 @@ void cbm_test_declarations_finish(CBMExtractCtx *ctx) {
     /* A configured QN collision is explicit rather than a later upsert loss. */
     for (int i = 0; i < ctx->test_definition_match_count; i++) {
         const struct CBMTestDefinitionMatch *match = &ctx->test_definition_matches[i];
-        if (!match->qn) continue; /* failed invocation; diagnostic already retained */
+        if (!match->qn)
+            continue; /* failed invocation; diagnostic already retained */
         int found = 0;
         for (int j = 0; j < ctx->result->defs.count; j++) {
             const char *qn = ctx->result->defs.items[j].qualified_name;
-            if (qn && strcmp(qn, match->qn) == 0) found++;
+            if (qn && strcmp(qn, match->qn) == 0)
+                found++;
         }
         if (found != 1)
             tdx_issue(ctx->result, CBM_TEST_EXTRACT_AMBIGUOUS, match->declaration, match->line);
@@ -4506,8 +4663,7 @@ void cbm_test_declarations_finish(CBMExtractCtx *ctx) {
         ctx->result->has_test_definition_owners = true;
         ctx->result->test_owner_source_len = ctx->source_len;
         ctx->result->test_owner_language = ctx->language;
-        cbm_sha256_hex(ctx->source, (size_t)ctx->source_len,
-                       ctx->result->test_owner_source_sha256);
+        cbm_sha256_hex(ctx->source, (size_t)ctx->source_len, ctx->result->test_owner_source_sha256);
     }
 }
 
@@ -4554,7 +4710,8 @@ static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec 
     TDXRule configured_rule;
     bool configured = tdx_resolve(ctx, node, name_node, name, &configured_name, &configured_rule);
     if (configured) {
-        if (!configured_name) return;
+        if (!configured_name)
+            return;
         name = (char *)configured_name;
     }
     if (!configured && tdx_preset(ctx, CBM_TEST_PRESET_GTEST) &&

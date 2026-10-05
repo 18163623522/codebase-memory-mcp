@@ -1,6 +1,13 @@
 #ifndef CBM_TEST_IMPACT_TREE_INTERNAL_H
 #define CBM_TEST_IMPACT_TREE_INTERNAL_H
 
+#ifdef _WIN32
+/* FILE_ID_INFO (stable 128-bit file identity) is a Windows 8 API; pin it
+ * before any system header so toolchains with an older default see it. */
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0602
+#endif
+#endif
 #ifndef _WIN32
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE

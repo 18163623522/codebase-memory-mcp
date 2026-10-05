@@ -54,6 +54,7 @@ enum {
 #include "mcp/mcp.h"
 #include "mcp/mcp_internal.h"
 #include "mcp/test_impact.h"
+#include "mcp/test_impact_engine.h"
 #include "store/store.h"
 #include "store/store_impact.h"
 #include <sqlite3.h>
@@ -774,7 +775,7 @@ static const tool_def_t TOOLS[] = {
 
     {"detect_changes", "Map a Git diff to files and impact. Page with snapshot cursors.",
      "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},\"scope\":{\"type\":"
-     "\"string\",\"enum\":[\"files\",\"impact\"],\"default\":\"impact\"},"
+     "\"string\",\"enum\":[\"files\",\"impact\",\"tests\"],\"default\":\"impact\"},"
      "\"direction\":{\"type\":\"string\",\"enum\":[\"inbound\",\"outbound\",\"both\"],\"default\":"
      "\"inbound\",\"description\":\"inbound=callers; outbound=dependencies; both=union.\"},"
      "\"depth\":{\"type\":\"integer\",\"default\":2},"
@@ -16476,6 +16477,68 @@ static bool detect_snapshot_fingerprint(cbm_mcp_server_t *srv, const char *root_
     return complete;
 }
 
+/* scope:"tests": which tests the change needs (mcp/test_impact_engine.h). The
+ * answer is computed from a graph of exactly the pinned HEAD commit, built
+ * for this request; the live index is not consulted. Missing evidence is a
+ * run-all answer that names why; only a failed request is an error. */
+static char *detect_test_impact(const char *args, const char *root_path, const char *base_branch) {
+    detect_seed_request_t seed_req = {0};
+    char err[CBM_SZ_1K] = "";
+    detect_seed_parse(args, &seed_req, err, sizeof(err));
+    if (err[0]) {
+        return cbm_mcp_text_result(err, true);
+    }
+    char config_file[CBM_SZ_4K] = "";
+    if (seed_req.config_path[0]) {
+        if (repo_path_is_absolute(seed_req.config_path)) {
+            snprintf(config_file, sizeof(config_file), "%s", seed_req.config_path);
+        } else {
+            snprintf(config_file, sizeof(config_file), "%s/%s", root_path, seed_req.config_path);
+        }
+    }
+    char work[CBM_SZ_4K];
+    snprintf(work, sizeof(work), "%s/test-impact", cbm_resolve_cache_dir());
+    if (!cbm_mkdir_p(work, 0700)) {
+        return cbm_mcp_text_result("test_impact_failed: no private work directory", true);
+    }
+    cbm_test_impact_request_t request = {.repo_root = root_path,
+                                         .base_ref = base_branch,
+                                         .work_parent = work,
+                                         .config_path = config_file[0] ? config_file : NULL,
+                                         .deadline_ms = cbm_now_ms() + 30ULL * 60ULL * 1000ULL};
+    cbm_test_result_t *result = NULL;
+    char diagnostic[CBM_SZ_512] = "";
+    cbm_test_impact_status_t status =
+        cbm_test_impact_run(&request, &result, diagnostic, sizeof(diagnostic));
+    if (status != CBM_TEST_IMPACT_OK) {
+        char text[CBM_SZ_1K];
+        snprintf(text, sizeof(text), "test_impact_failed: status %d%s%s", (int)status,
+                 diagnostic[0] ? ": " : "", diagnostic);
+        return cbm_mcp_text_result(text, true);
+    }
+    size_t length = 0;
+    const char *json = cbm_test_result_json(result, &length);
+    char *res = NULL;
+    size_t total = length + sizeof("{\"test_impact\":}");
+    char *text = json ? cbm_alloc(CBM_MEM_CLASS_OTHER, total) : NULL;
+    if (text) {
+        snprintf(text, total, "{\"test_impact\":%s}", json);
+        res = cbm_mcp_text_result(text, false);
+        cbm_free(CBM_MEM_CLASS_OTHER, text);
+    }
+    cbm_test_result_free(result);
+    return res ? res : cbm_mcp_text_result("test_impact_failed: out of memory", true);
+}
+
+/* The request strings handle_detect_changes owns, released on every early
+ * return (NULL is fine). */
+static void detect_release(char *root_path, char *project, char *base_branch, char *scope) {
+    free(root_path);
+    free(project);
+    free(base_branch);
+    free(scope);
+}
+
 static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
     char *project = get_project_arg(args);
     char *base_branch = cbm_mcp_get_string_arg(args, "base_branch");
@@ -16530,11 +16593,14 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
 
     if (!validate_search_path_arg(root_path) ||
         !validate_windows_cmd_interpolation_arg(root_path)) {
-        free(root_path);
-        free(project);
-        free(base_branch);
-        free(scope);
+        detect_release(root_path, project, base_branch, scope);
         return cbm_mcp_text_result("project path contains invalid characters", true);
+    }
+
+    if (scope && strcmp(scope, "tests") == 0) {
+        char *res = detect_test_impact(args, root_path, base_branch);
+        detect_release(root_path, project, base_branch, scope);
+        return res;
     }
 
     /* Every detect snapshot and cursor is generation-bound. Validate the
@@ -16543,10 +16609,7 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
     cbm_store_t *store = srv->store;
     char generation[96] = "";
     if (cbm_store_generation(store, generation, sizeof(generation)) != CBM_STORE_OK) {
-        free(root_path);
-        free(project);
-        free(base_branch);
-        free(scope);
+        detect_release(root_path, project, base_branch, scope);
         return cbm_mcp_text_result(
             "index_metadata_error: generation metadata is unreadable; reindex before detecting "
             "changes",

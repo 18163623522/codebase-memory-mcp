@@ -44,51 +44,55 @@ typedef struct {
 #define GD_B GD_ALLOW_BLOB
 
 static const gd_column_t gd_projects[] = {
-    {"name", GD_T, 0, 1}, {"indexed_at", GD_T, 0, 0}, {"root_path", GD_T, 0, 0}
-};
-static const gd_column_t gd_file_hashes[] = {
-    {"project", GD_T, 0, 1}, {"rel_path", GD_T, 0, 2}, {"sha256", GD_T, 0, 0},
-    {"mtime_ns", GD_I, 0, 0}, {"size", GD_I, 0, 0}
-};
-static const gd_column_t gd_nodes[] = {
-    {"id", GD_I, 0, 1}, {"project", GD_T, 0, 0}, {"label", GD_T, 0, 0},
-    {"name", GD_T, 0, 0}, {"qualified_name", GD_T, 0, 0},
-    {"file_path", GD_T | GD_N, 0, 0}, {"start_line", GD_I | GD_N, 0, 0},
-    {"end_line", GD_I | GD_N, 0, 0}, {"properties", GD_T | GD_N, 0, 0}
-};
-static const gd_column_t gd_edges[] = {
-    {"id", GD_I, 0, 1}, {"project", GD_T, 0, 0}, {"source_id", GD_I, 0, 0},
-    {"target_id", GD_I, 0, 0}, {"type", GD_T, 0, 0},
-    {"properties", GD_T | GD_N, 0, 0}, {"url_path_gen", GD_T | GD_N, 2, 0},
-    {"local_name_gen", GD_T | GD_N, 2, 0}
-};
-static const gd_column_t gd_project_summaries[] = {
-    {"project", GD_T, 0, 1}, {"summary", GD_T, 0, 0}, {"source_hash", GD_T, 0, 0},
-    {"created_at", GD_T, 0, 0}, {"updated_at", GD_T, 0, 0}
-};
+    {"name", GD_T, 0, 1}, {"indexed_at", GD_T, 0, 0}, {"root_path", GD_T, 0, 0}};
+static const gd_column_t gd_file_hashes[] = {{"project", GD_T, 0, 1},
+                                             {"rel_path", GD_T, 0, 2},
+                                             {"sha256", GD_T, 0, 0},
+                                             {"mtime_ns", GD_I, 0, 0},
+                                             {"size", GD_I, 0, 0}};
+static const gd_column_t gd_nodes[] = {{"id", GD_I, 0, 1},
+                                       {"project", GD_T, 0, 0},
+                                       {"label", GD_T, 0, 0},
+                                       {"name", GD_T, 0, 0},
+                                       {"qualified_name", GD_T, 0, 0},
+                                       {"file_path", GD_T | GD_N, 0, 0},
+                                       {"start_line", GD_I | GD_N, 0, 0},
+                                       {"end_line", GD_I | GD_N, 0, 0},
+                                       {"properties", GD_T | GD_N, 0, 0}};
+static const gd_column_t gd_edges[] = {{"id", GD_I, 0, 1},
+                                       {"project", GD_T, 0, 0},
+                                       {"source_id", GD_I, 0, 0},
+                                       {"target_id", GD_I, 0, 0},
+                                       {"type", GD_T, 0, 0},
+                                       {"properties", GD_T | GD_N, 0, 0},
+                                       {"url_path_gen", GD_T | GD_N, 2, 0},
+                                       {"local_name_gen", GD_T | GD_N, 2, 0}};
+static const gd_column_t gd_project_summaries[] = {{"project", GD_T, 0, 1},
+                                                   {"summary", GD_T, 0, 0},
+                                                   {"source_hash", GD_T, 0, 0},
+                                                   {"created_at", GD_T, 0, 0},
+                                                   {"updated_at", GD_T, 0, 0}};
 static const gd_column_t gd_lsp_surface[] = {
-    {"project", GD_T, 0, 1}, {"rel_path", GD_T, 0, 2}, {"surface_sha", GD_T, 0, 0},
-    {"defs_json", GD_T, 0, 0}, {"ref_bloom", GD_B | GD_N, 0, 0},
-    {"config_ctx", GD_T, 0, 0}
-};
-static const gd_column_t gd_index_coverage[] = {
-    {"project", GD_T, 0, 1}, {"rel_path", GD_T, 0, 2}, {"kind", GD_T, 0, 3},
-    {"detail", GD_T | GD_N, 0, 0}
-};
-static const gd_column_t gd_index_coverage_meta[] = {
-    {"project", GD_T, 0, 1}, {"generation", GD_T, 0, 0}, {"index_mode", GD_T, 0, 0},
-    {"recorded_at", GD_T, 0, 0}, {"recording_status", GD_T, 0, 0},
-    {"ignored_files_stored", GD_I, 0, 0}, {"ignored_files_total", GD_I, 0, 0},
-    {"coverage_version", GD_I, 0, 0}, {"hash_records_complete", GD_I, 0, 0}
-};
-static const gd_column_t gd_store_meta[] = {
-    {"k", GD_T, 0, 1}, {"v", GD_T, 0, 0}
-};
+    {"project", GD_T, 0, 1},   {"rel_path", GD_T, 0, 2},         {"surface_sha", GD_T, 0, 0},
+    {"defs_json", GD_T, 0, 0}, {"ref_bloom", GD_B | GD_N, 0, 0}, {"config_ctx", GD_T, 0, 0}};
+static const gd_column_t gd_index_coverage[] = {{"project", GD_T, 0, 1},
+                                                {"rel_path", GD_T, 0, 2},
+                                                {"kind", GD_T, 0, 3},
+                                                {"detail", GD_T | GD_N, 0, 0}};
+static const gd_column_t gd_index_coverage_meta[] = {{"project", GD_T, 0, 1},
+                                                     {"generation", GD_T, 0, 0},
+                                                     {"index_mode", GD_T, 0, 0},
+                                                     {"recorded_at", GD_T, 0, 0},
+                                                     {"recording_status", GD_T, 0, 0},
+                                                     {"ignored_files_stored", GD_I, 0, 0},
+                                                     {"ignored_files_total", GD_I, 0, 0},
+                                                     {"coverage_version", GD_I, 0, 0},
+                                                     {"hash_records_complete", GD_I, 0, 0}};
+static const gd_column_t gd_store_meta[] = {{"k", GD_T, 0, 1}, {"v", GD_T, 0, 0}};
 
 /* These descriptors and SQL strings are immutable; all other state is local. */
 static const gd_table_t gd_tables[GD_TABLE_COUNT] = {
-    {"projects", gd_projects, GD_COLUMNS(gd_projects),
-     "PRAGMA main.table_xinfo('projects');",
+    {"projects", gd_projects, GD_COLUMNS(gd_projects), "PRAGMA main.table_xinfo('projects');",
      "SELECT name,indexed_at,root_path FROM main.projects ORDER BY CAST(name AS BLOB) ASC;"},
     {"file_hashes", gd_file_hashes, GD_COLUMNS(gd_file_hashes),
      "PRAGMA main.table_xinfo('file_hashes');",
@@ -119,8 +123,7 @@ static const gd_table_t gd_tables[GD_TABLE_COUNT] = {
      "ORDER BY CAST(project AS BLOB) ASC;"},
     {"store_meta", gd_store_meta, GD_COLUMNS(gd_store_meta),
      "PRAGMA main.table_xinfo('store_meta');",
-     "SELECT k,v FROM main.store_meta ORDER BY CAST(k AS BLOB) ASC;"}
-};
+     "SELECT k,v FROM main.store_meta ORDER BY CAST(k AS BLOB) ASC;"}};
 
 #undef GD_B
 #undef GD_N
@@ -150,9 +153,9 @@ static bool gd_fail(gd_context_t *g, cbm_store_graph_digest_status_t status) {
     if (g->status == CBM_STORE_GRAPH_DIGEST_OK) {
         g->status = status;
         if (g->scope) {
-            (void)cbm_store_read_scope_fail(
-                g->scope, status == CBM_STORE_GRAPH_DIGEST_CANCELLED ?
-                          CBM_STORE_CANCELLED : CBM_STORE_ERR);
+            (void)cbm_store_read_scope_fail(g->scope, status == CBM_STORE_GRAPH_DIGEST_CANCELLED
+                                                          ? CBM_STORE_CANCELLED
+                                                          : CBM_STORE_ERR);
         }
     }
     return false;
@@ -162,8 +165,8 @@ static bool gd_check(gd_context_t *g) {
     if (g->scope) {
         int status = cbm_store_read_scope_check(g->scope);
         if (status != CBM_STORE_OK) {
-            return gd_fail(g, status == CBM_STORE_CANCELLED ?
-                              CBM_STORE_GRAPH_DIGEST_CANCELLED : CBM_STORE_GRAPH_DIGEST_ERROR);
+            return gd_fail(g, status == CBM_STORE_CANCELLED ? CBM_STORE_GRAPH_DIGEST_CANCELLED
+                                                            : CBM_STORE_GRAPH_DIGEST_ERROR);
         }
     }
     return g->status == CBM_STORE_GRAPH_DIGEST_OK;
@@ -486,8 +489,7 @@ static bool gd_table_header(gd_context_t *g, int index, bool present) {
     }
     for (int i = 0; i < table->column_count; i++) {
         const gd_column_t *column = &table->columns[i];
-        if (!gd_literal(g, column->name) || !gd_u8(g, column->types) ||
-            !gd_u8(g, column->kind)) {
+        if (!gd_literal(g, column->name) || !gd_u8(g, column->types) || !gd_u8(g, column->kind)) {
             return false;
         }
     }
@@ -506,8 +508,7 @@ static bool gd_table_header(gd_context_t *g, int index, bool present) {
         return gd_fail(g, CBM_STORE_GRAPH_DIGEST_SCHEMA);
     }
     gd_text_t name, type, sql;
-    if (!gd_read_text(g, 0, &name) || !gd_read_text(g, 1, &type) ||
-        !gd_read_text(g, 2, &sql)) {
+    if (!gd_read_text(g, 0, &name) || !gd_read_text(g, 1, &type) || !gd_read_text(g, 2, &sql)) {
         return false;
     }
     if (!gd_text_eq(name, table->name) || !gd_text_eq(type, "table")) {
@@ -564,11 +565,20 @@ static bool gd_column_value(gd_context_t *g, int index, const gd_column_t *colum
     int sql_type = sqlite3_column_type(g->stmt, index);
     unsigned char tag;
     switch (sql_type) {
-    case SQLITE_NULL: tag = GD_NULL; break;
-    case SQLITE_INTEGER: tag = GD_INTEGER; break;
-    case SQLITE_TEXT: tag = GD_TEXT; break;
-    case SQLITE_BLOB: tag = GD_BLOB; break;
-    default: return gd_fail(g, CBM_STORE_GRAPH_DIGEST_SCHEMA);
+    case SQLITE_NULL:
+        tag = GD_NULL;
+        break;
+    case SQLITE_INTEGER:
+        tag = GD_INTEGER;
+        break;
+    case SQLITE_TEXT:
+        tag = GD_TEXT;
+        break;
+    case SQLITE_BLOB:
+        tag = GD_BLOB;
+        break;
+    default:
+        return gd_fail(g, CBM_STORE_GRAPH_DIGEST_SCHEMA);
     }
     if (!(column->types & (1u << tag))) {
         return gd_fail(g, CBM_STORE_GRAPH_DIGEST_SCHEMA);
@@ -583,8 +593,7 @@ static bool gd_column_value(gd_context_t *g, int index, const gd_column_t *colum
     }
     if (tag == GD_TEXT) {
         gd_text_t value;
-        return gd_read_text(g, index, &value) &&
-               gd_value(g, tag, value.data, value.length);
+        return gd_read_text(g, index, &value) && gd_value(g, tag, value.data, value.length);
     }
     const void *blob = sqlite3_column_blob(g->stmt, index);
     int length = sqlite3_column_bytes(g->stmt, index);
@@ -655,10 +664,8 @@ static bool gd_project_argument(gd_context_t *g, const unsigned char *project, s
 }
 
 cbm_store_graph_digest_status_t cbm_store_graph_digest(
-    cbm_store_read_scope_t *scope,
-    const unsigned char *project, size_t project_len,
-    const cbm_store_graph_digest_limits_t *limits,
-    cbm_store_graph_digest_t *out) {
+    cbm_store_read_scope_t *scope, const unsigned char *project, size_t project_len,
+    const cbm_store_graph_digest_limits_t *limits, cbm_store_graph_digest_t *out) {
     if (out) {
         memset(out, 0, sizeof(*out));
     }

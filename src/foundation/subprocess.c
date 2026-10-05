@@ -679,7 +679,8 @@ static cbm_proc_poll_t cbm_subprocess_finish_failed(cbm_subprocess_t *process,
 /* Match cbm_path_to_wide's file-path spelling using the process arena. Existing
  * option conversions retain their legacy heap ownership. */
 static wchar_t *cbm_win_stdin_path(cbm_subprocess_t *process) {
-    int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, process->stdin_file, -1, NULL, 0);
+    int length =
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, process->stdin_file, -1, NULL, 0);
     if (length <= 0 || length > 32767) {
         return NULL;
     }
@@ -764,12 +765,19 @@ static int cbm_subprocess_spawn_win(cbm_subprocess_t *process) {
     if (!built) {
         return -1;
     }
+    /* Everything a failure must release, so every failure leaves through
+     * the one exit at the end. */
+    HANDLE job = NULL;
+    HANDLE nul = INVALID_HANDLE_VALUE;
+    HANDLE input = INVALID_HANDLE_VALUE;
+    HANDLE log = INVALID_HANDLE_VALUE;
+    HANDLE stdout_capture = INVALID_HANDLE_VALUE;
+    LPPROC_THREAD_ATTRIBUTE_LIST attrs = NULL;
+    bool attrs_init = false;
     wchar_t *wbin = cbm_utf8_to_wide(process->bin);
     wchar_t *wcmdline = cbm_utf8_to_wide(cmdline);
     if (!wbin || !wcmdline) {
-        free(wbin);
-        free(wcmdline);
-        return -1;
+        goto fail;
     }
 
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
@@ -779,31 +787,20 @@ static int cbm_subprocess_spawn_win(cbm_subprocess_t *process) {
         limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
         limits.JobMemoryLimit = (SIZE_T)process->memory_limit_bytes;
     }
-    HANDLE job = CreateJobObjectW(NULL, NULL);
+    job = CreateJobObjectW(NULL, NULL);
     if (!job ||
         !SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
-        if (job) {
-            CloseHandle(job);
-        }
-        free(wbin);
-        free(wcmdline);
-        return -1;
+        goto fail;
     }
 
     SECURITY_ATTRIBUTES security;
     ZeroMemory(&security, sizeof(security));
     security.nLength = sizeof(security);
     security.bInheritHandle = TRUE;
-    HANDLE nul = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE,
-                             FILE_SHARE_READ | FILE_SHARE_WRITE, &security, OPEN_EXISTING, 0, NULL);
-    HANDLE input = INVALID_HANDLE_VALUE;
-    HANDLE log = INVALID_HANDLE_VALUE;
-    HANDLE stdout_capture = INVALID_HANDLE_VALUE;
+    nul = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                      &security, OPEN_EXISTING, 0, NULL);
     if (nul == INVALID_HANDLE_VALUE) {
-        CloseHandle(job);
-        free(wbin);
-        free(wcmdline);
-        return -1;
+        goto fail;
     }
     if (process->stdin_file) {
         wchar_t *winput = cbm_win_stdin_path(process);
@@ -811,8 +808,8 @@ static int cbm_subprocess_spawn_win(cbm_subprocess_t *process) {
          * handle rather than relying only on path attributes. */
         DWORD attributes = winput ? GetFileAttributesW(winput) : INVALID_FILE_ATTRIBUTES;
         if (attributes != INVALID_FILE_ATTRIBUTES &&
-            !(attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT |
-                            FILE_ATTRIBUTE_DEVICE))) {
+            !(attributes &
+              (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DEVICE))) {
             input = CreateFileW(winput, GENERIC_READ, FILE_SHARE_READ, &security, OPEN_EXISTING,
                                 FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
         }
@@ -821,11 +818,7 @@ static int cbm_subprocess_spawn_win(cbm_subprocess_t *process) {
             !GetFileInformationByHandle(input, &input_info) ||
             (input_info.dwFileAttributes &
              (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DEVICE))) {
-            cbm_win_close_spawn_handles(nul, input, log, stdout_capture, NULL, false);
-            CloseHandle(job);
-            free(wbin);
-            free(wcmdline);
-            return -1;
+            goto fail;
         }
     }
     if (process->log_file) {
@@ -841,11 +834,7 @@ static int cbm_subprocess_spawn_win(cbm_subprocess_t *process) {
             free(wlog);
         }
         if (log == INVALID_HANDLE_VALUE) {
-            cbm_win_close_spawn_handles(nul, input, log, stdout_capture, NULL, false);
-            CloseHandle(job);
-            free(wbin);
-            free(wcmdline);
-            return -1;
+            goto fail;
         }
     }
 
@@ -857,11 +846,7 @@ static int cbm_subprocess_spawn_win(cbm_subprocess_t *process) {
             free(wstdout);
         }
         if (stdout_capture == INVALID_HANDLE_VALUE) {
-            cbm_win_close_spawn_handles(nul, input, log, stdout_capture, NULL, false);
-            CloseHandle(job);
-            free(wbin);
-            free(wcmdline);
-            return -1;
+            goto fail;
         }
     }
 
@@ -879,17 +864,13 @@ static int cbm_subprocess_spawn_win(cbm_subprocess_t *process) {
     }
     SIZE_T attrs_size = 0;
     (void)InitializeProcThreadAttributeList(NULL, 1, 0, &attrs_size);
-    LPPROC_THREAD_ATTRIBUTE_LIST attrs = (LPPROC_THREAD_ATTRIBUTE_LIST)malloc(attrs_size);
-    bool attrs_init = attrs && InitializeProcThreadAttributeList(attrs, 1, 0, &attrs_size);
+    attrs = (LPPROC_THREAD_ATTRIBUTE_LIST)malloc(attrs_size);
+    attrs_init = attrs && InitializeProcThreadAttributeList(attrs, 1, 0, &attrs_size);
     bool attrs_ready = attrs_init && UpdateProcThreadAttribute(
                                          attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit,
                                          inherit_count * sizeof(inherit[0]), NULL, NULL);
     if (!attrs_ready) {
-        cbm_win_close_spawn_handles(nul, input, log, stdout_capture, attrs, attrs_init);
-        CloseHandle(job);
-        free(wbin);
-        free(wcmdline);
-        return -1;
+        goto fail;
     }
 
     STARTUPINFOEXW startup;
@@ -948,6 +929,15 @@ static int cbm_subprocess_spawn_win(cbm_subprocess_t *process) {
     process->process_id = child.dwProcessId;
     process->job = job;
     return 0;
+
+fail:
+    cbm_win_close_spawn_handles(nul, input, log, stdout_capture, attrs, attrs_init);
+    if (job) {
+        CloseHandle(job);
+    }
+    free(wbin);
+    free(wcmdline);
+    return -1;
 }
 
 static bool cbm_win_job_active(cbm_subprocess_t *process, bool *known) {

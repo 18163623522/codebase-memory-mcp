@@ -482,9 +482,8 @@ static cv_meta_suite_t *cv_meta_find_suite(cv_meta_suite_t *suites, int count, c
 
 bool cbm_coverage_map_metadata_matches(const cbm_coverage_map_t *map, const char *metadata,
                                        size_t len, const char *expected_commit) {
-    if (!map || map->format != CBM_COVERAGE_FORMAT_FUNCTIONS || !metadata ||
-        len == SIZE_MAX || !cv_meta_commit(expected_commit) ||
-        memchr(metadata, '\0', len)) {
+    if (!map || map->format != CBM_COVERAGE_FORMAT_FUNCTIONS || !metadata || len == SIZE_MAX ||
+        !cv_meta_commit(expected_commit) || memchr(metadata, '\0', len)) {
         return false;
     }
     yyjson_doc *doc = yyjson_read(metadata, len, 0);
@@ -747,8 +746,8 @@ static char *cv2_string(cv2_context_t *ctx, cv2_span_t span) {
     return text;
 }
 
-static bool cv2_line(cv2_context_t *ctx, cv2_span_t input, size_t *position,
-                     bool test_row, cv2_span_t *line) {
+static bool cv2_line(cv2_context_t *ctx, cv2_span_t input, size_t *position, bool test_row,
+                     cv2_span_t *line) {
     size_t start = *position;
     while (*position < input.length) {
         if (!cv2_step(ctx))
@@ -786,8 +785,8 @@ static bool cv2_fields(cv2_context_t *ctx, cv2_span_t line, cv2_span_t fields[4]
     return true;
 }
 
-static bool cv2_row(cv2_context_t *ctx, cv2_span_t input, size_t *position,
-                    bool test_row, cv2_span_t fields[4]) {
+static bool cv2_row(cv2_context_t *ctx, cv2_span_t input, size_t *position, bool test_row,
+                    cv2_span_t fields[4]) {
     cv2_span_t line;
     return cv2_line(ctx, input, position, test_row, &line) && cv2_fields(ctx, line, fields);
 }
@@ -796,8 +795,7 @@ static bool cv2_literal(cv2_span_t span, const char *literal, size_t length) {
     return span.length == length && memcmp(span.data, literal, length) == 0;
 }
 
-static bool cv2_decimal(cv2_context_t *ctx, cv2_span_t span, bool canonical,
-                        uint64_t *out) {
+static bool cv2_decimal(cv2_context_t *ctx, cv2_span_t span, bool canonical, uint64_t *out) {
     if (!span.length || (canonical && span.length > 1 && span.data[0] == '0'))
         return cv2_fail(ctx, CBM_COVERAGE_PARSE_FORMAT);
     uint64_t value = 0;
@@ -885,7 +883,9 @@ static bool cv2_profile_inventory(cv2_context_t *ctx, cv2_span_t profiles) {
         if (!cv2_items(ctx, 1))
             return false;
     }
-    return count == ctx->profile_count || cv2_fail(ctx, CBM_COVERAGE_PARSE_FORMAT);
+    if (count != ctx->profile_count)
+        return cv2_fail(ctx, CBM_COVERAGE_PARSE_FORMAT);
+    return true;
 }
 
 static bool cv2_id_count(cv2_context_t *ctx, cv2_span_t span, int *out) {
@@ -971,8 +971,8 @@ static bool cv2_profile_compare(cv2_context_t *ctx, const cbm_coverage_profile_t
         *out = left->name_length < right->name_length ? -1 : 1;
         return true;
     }
-    *out = (left->function_hash > right->function_hash) -
-           (left->function_hash < right->function_hash);
+    *out =
+        (left->function_hash > right->function_hash) - (left->function_hash < right->function_hash);
     return true;
 }
 
@@ -1010,7 +1010,9 @@ static bool cv2_profiles(cv2_context_t *ctx, cv2_span_t profiles) {
             !cv2_profile(ctx, fields, i))
             return false;
     }
-    return position == profiles.length || cv2_fail(ctx, CBM_COVERAGE_PARSE_FORMAT);
+    if (position != profiles.length)
+        return cv2_fail(ctx, CBM_COVERAGE_PARSE_FORMAT);
+    return true;
 }
 
 static bool cv2_test_name(cv2_context_t *ctx, cv2_span_t field, cbm_coverage_test_t *row) {
@@ -1078,7 +1080,9 @@ static bool cv2_tests(cv2_context_t *ctx, cv2_span_t tests) {
             !cv2_test_ids(ctx, fields[3], row))
             return false;
     }
-    return position == tests.length || cv2_fail(ctx, CBM_COVERAGE_PARSE_FORMAT);
+    if (position != tests.length)
+        return cv2_fail(ctx, CBM_COVERAGE_PARSE_FORMAT);
+    return true;
 }
 
 static bool cv2_string_compare(cv2_context_t *ctx, const char *a, const char *b, int *out) {
@@ -1173,7 +1177,9 @@ static bool cv2_validate_tests(cv2_context_t *ctx) {
         if (row->name[0] == '*' && row->name[1] == '\0')
             setup = true;
     }
-    return !ctx->test_count || setup || cv2_fail(ctx, CBM_COVERAGE_PARSE_FORMAT);
+    if (ctx->test_count && !setup)
+        return cv2_fail(ctx, CBM_COVERAGE_PARSE_FORMAT);
+    return true;
 }
 
 static bool cv2_hash(cv2_context_t *ctx, cv2_span_t span, char hex[CBM_SHA256_HEX_LEN + 1]) {
@@ -1203,8 +1209,8 @@ static bool cv2_hash(cv2_context_t *ctx, cv2_span_t span, char hex[CBM_SHA256_HE
 }
 
 static cbm_coverage_parse_status_t cv2_arguments(const void *profiles, size_t profiles_len,
-                                                const char *tests, size_t tests_len,
-                                                const cbm_coverage_parse_limits_t *limits) {
+                                                 const char *tests, size_t tests_len,
+                                                 const cbm_coverage_parse_limits_t *limits) {
     if (!profiles || (!tests && tests_len) || !limits)
         return CBM_COVERAGE_PARSE_INVALID;
     if (!limits->max_input_bytes || limits->max_input_bytes > UINT64_MAX / 8 ||
@@ -1221,18 +1227,23 @@ static cbm_coverage_parse_status_t cv2_arguments(const void *profiles, size_t pr
     return CBM_COVERAGE_PARSE_OK;
 }
 
-cbm_coverage_parse_status_t cbm_coverage_map_parse_v2(
-    const void *profiles, size_t profiles_len, const char *tests, size_t tests_len,
-    const cbm_coverage_parse_limits_t *limits, cbm_coverage_parse_cancel_fn cancelled,
-    void *cancel_context, cbm_coverage_map_t **out) {
+cbm_coverage_parse_status_t cbm_coverage_map_parse_v2(const void *profiles, size_t profiles_len,
+                                                      const char *tests, size_t tests_len,
+                                                      const cbm_coverage_parse_limits_t *limits,
+                                                      cbm_coverage_parse_cancel_fn cancelled,
+                                                      void *cancel_context,
+                                                      cbm_coverage_map_t **out) {
     if (!out)
         return CBM_COVERAGE_PARSE_INVALID;
     *out = NULL;
-    cbm_coverage_parse_status_t status = cv2_arguments(profiles, profiles_len, tests, tests_len, limits);
+    cbm_coverage_parse_status_t status =
+        cv2_arguments(profiles, profiles_len, tests, tests_len, limits);
     if (status != CBM_COVERAGE_PARSE_OK)
         return status;
-    cv2_context_t ctx = {.limits = limits, .cancelled = cancelled,
-                         .cancel_context = cancel_context, .status = CBM_COVERAGE_PARSE_OK};
+    cv2_context_t ctx = {.limits = limits,
+                         .cancelled = cancelled,
+                         .cancel_context = cancel_context,
+                         .status = CBM_COVERAGE_PARSE_OK};
     cbm_arena_init_lazy(&ctx.arena, 4096);
     cv2_span_t profile_span = {profiles, profiles_len};
     cv2_span_t test_span = {(const unsigned char *)tests, tests_len};
@@ -1264,7 +1275,8 @@ const char *cbm_coverage_map_identity_sha256(const cbm_coverage_map_t *map) {
     return map ? map->functions_sha256 : NULL;
 }
 
-const cbm_coverage_profile_binding_t *cbm_coverage_map_profile_binding(const cbm_coverage_map_t *map) {
+const cbm_coverage_profile_binding_t *cbm_coverage_map_profile_binding(
+    const cbm_coverage_map_t *map) {
     return map && map->format == CBM_COVERAGE_FORMAT_PROFILES ? &map->profile_binding : NULL;
 }
 

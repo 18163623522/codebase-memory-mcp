@@ -49,9 +49,9 @@ typedef struct {
      * map and its test observations. A v1 receipt cannot admit a v2 map;
      * successful parsing supplies no admission evidence. */
     bool artifact_admitted;
-    bool origin_source_verified; /* authenticated repository/A/table/manifest tuple */
+    bool origin_source_verified;       /* authenticated repository/A/table/manifest tuple */
     bool origin_attestations_verified; /* supported producer claim/proof semantics */
-    bool comparisons_verified; /* complete same-owner A ancestor of actual M, pinned H */
+    bool comparisons_verified;         /* complete same-owner A ancestor of actual M, pinned H */
     cbm_coverage_origin_binding_t binding;
     unsigned char artifact_to_head_sha256[32];
     unsigned char merge_base_to_head_sha256[32];
@@ -68,9 +68,9 @@ typedef struct {
 
 typedef struct {
     uint64_t max_input_bytes; /* manifest + AH + MH + context key; <= UINT64_MAX/8 */
-    uint64_t max_items; /* decoded records, borrowed map checks and ID visits; see spec */
-    size_t max_alloc_bytes; /* cumulative logical arena allocation requests */
-    size_t max_result_ids; /* distinct final union cardinality; positive, <= INT_MAX */
+    uint64_t max_items;       /* decoded records, borrowed map checks and ID visits; see spec */
+    size_t max_alloc_bytes;   /* cumulative logical arena allocation requests */
+    size_t max_result_ids;    /* distinct final union cardinality; positive, <= INT_MAX */
 } cbm_coverage_origin_limits_t;
 
 typedef bool (*cbm_coverage_origin_cancel_fn)(void *context);
@@ -99,10 +99,7 @@ enum {
     CBM_COVERAGE_ORIGIN_EDIT_T = 1u << 3
 };
 
-enum {
-    CBM_COVERAGE_ORIGIN_FROM_ARTIFACT = 1u << 0,
-    CBM_COVERAGE_ORIGIN_FROM_MERGE_BASE = 1u << 1
-};
+enum { CBM_COVERAGE_ORIGIN_FROM_ARTIFACT = 1u << 0, CBM_COVERAGE_ORIGIN_FROM_MERGE_BASE = 1u << 1 };
 
 enum {
     CBM_COVERAGE_ORIGIN_PROFILE_UNIVERSE_UNKNOWN = 1u << 0,
@@ -120,8 +117,8 @@ typedef struct {
     char artifact_status; /* A/M/D/T or zero when absent from that comparison */
     char merge_base_status;
     cbm_coverage_origin_disposition_t disposition; /* UNKNOWN for missing row */
-    unsigned supported_edits; /* zero for missing row */
-    unsigned reasons; /* local gaps only; global gaps affect overall completeness */
+    unsigned supported_edits;                      /* zero for missing row */
+    unsigned reasons;        /* local gaps only; global gaps affect overall completeness */
     const int *function_ids; /* owned ascending unique positive evidence */
     size_t function_count;
 } cbm_coverage_origin_path_t;
@@ -139,11 +136,11 @@ typedef struct cbm_coverage_origin_join cbm_coverage_origin_join_t;
  * owner. Missing evidence is OK/incomplete; malformed input, wrong binding,
  * missing admission, cancel, limit and OOM are errors. No inferred identities.
  * The adapter MUST use can_narrow, never complete alone. */
-cbm_coverage_origin_status_t cbm_coverage_origin_join(
-    const cbm_coverage_origin_input_t *input,
-    const cbm_coverage_origin_limits_t *limits,
-    cbm_coverage_origin_cancel_fn cancelled, void *cancel_context,
-    cbm_coverage_origin_join_t **out);
+cbm_coverage_origin_status_t cbm_coverage_origin_join(const cbm_coverage_origin_input_t *input,
+                                                      const cbm_coverage_origin_limits_t *limits,
+                                                      cbm_coverage_origin_cancel_fn cancelled,
+                                                      void *cancel_context,
+                                                      cbm_coverage_origin_join_t **out);
 void cbm_coverage_origin_join_free(cbm_coverage_origin_join_t *join);
 
 /* Views are immutable until join_free; path views may share one owned ALL ID
@@ -161,7 +158,6 @@ bool cbm_coverage_origin_join_broad_fallback_required(const cbm_coverage_origin_
 bool cbm_coverage_origin_join_can_narrow(const cbm_coverage_origin_join_t *join);
 unsigned cbm_coverage_origin_join_reasons(const cbm_coverage_origin_join_t *join);
 /* Preserve cross-checked D4a M->H state. Never derive EMPTY from AH or ID count. */
-cbm_changes_state_t cbm_coverage_origin_join_request_state(
-    const cbm_coverage_origin_join_t *join);
+cbm_changes_state_t cbm_coverage_origin_join_request_state(const cbm_coverage_origin_join_t *join);
 
 #endif

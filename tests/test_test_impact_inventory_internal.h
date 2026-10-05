@@ -15,6 +15,8 @@
 bool ni_write(if_native *n, const char *path, const void *bytes, size_t size);
 bool ni_ambient_change(if_native *n);
 bool ni_replace_snapshot(if_native *n, bool empty_controls);
+bool ni_reset_input(if_native *n);
+bool ni_commit_input(if_native *n);
 bool ni_tree(if_native *n, cbm_git_revision_t revision);
 bool ni_dependency(if_native *n, cbm_git_revision_t revision);
 bool ni_start(if_native *n);

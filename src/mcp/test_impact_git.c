@@ -98,9 +98,7 @@ static bool gf_limit(cbm_git_facts_t *facts, cbm_git_facts_error_t *error, const
 static size_t gf_input_length(const char *text) {
     if (!text)
         return SIZE_MAX;
-    size_t n = 0;
-    while (n <= GF_INPUT_MAX && text[n])
-        n++;
+    size_t n = strnlen(text, (size_t)GF_INPUT_MAX + 1);
     return n <= GF_INPUT_MAX ? n : SIZE_MAX;
 }
 
@@ -171,8 +169,8 @@ static void *gf_allocate(cbm_git_facts_t *facts, CBMArena *arena, size_t size,
     return out;
 }
 
-static bool gf_metadata_equal(cbm_git_facts_t *facts, const char *a, const char *b,
-                              bool *equal, cbm_git_facts_error_t *error) {
+static bool gf_metadata_equal(cbm_git_facts_t *facts, const char *a, const char *b, bool *equal,
+                              cbm_git_facts_error_t *error) {
     if (!facts->batch_budget) {
         *equal = strcmp(a, b) == 0;
         return true;
@@ -287,12 +285,12 @@ static bool gf_private_directory(cbm_git_facts_t *facts, char path[GF_PATH_CAP],
         int n = snprintf(path, GF_PATH_CAP, "%s/cbm-git-facts-%s", tmp, suffix);
         if (n < 0 || n >= GF_PATH_CAP)
             break;
-        wchar_t *wide = cbm_path_to_wide(path);
+        wchar_t *wide = cbm_path_to_wide_in(CBM_MEM_CLASS_OTHER, path);
         if (!wide)
             break;
         created = CreateDirectoryW(wide, &attributes) != 0;
         DWORD why = GetLastError();
-        free(wide); /* existing UTF-8 conversion helper owns this buffer */
+        cbm_free(CBM_MEM_CLASS_OTHER, wide);
         if (created || (why != ERROR_ALREADY_EXISTS && why != ERROR_FILE_EXISTS))
             break;
     }
@@ -474,8 +472,8 @@ static void gf_command_diagnostic(cbm_git_facts_error_t *error, const gf_result_
 /* Observed file-size limits request cancellation. They are not instantaneous
  * disk quotas; final retained bytes are bounded independently after quiescence. */
 static bool gf_run_input(cbm_git_facts_t *facts, const char *const *arguments, int count,
-                         bool allow_exit_one, const cbm_git_bytes_t *input,
-                         gf_result_t *out, cbm_git_facts_error_t *error) {
+                         bool allow_exit_one, const cbm_git_bytes_t *input, gf_result_t *out,
+                         cbm_git_facts_error_t *error) {
     memset(out, 0, sizeof(*out));
     out->exit_code = -1;
     if (!gf_gate(facts, error))
@@ -572,8 +570,7 @@ static bool gf_run_input(cbm_git_facts_t *facts, const char *const *arguments, i
     }
     /* New batches classify a known command failure before cleanup. Cleanup
      * must not replace an established error; legacy calls keep their ordering. */
-    if (ok && facts->batch_budget &&
-        !(result.outcome == CBM_PROC_CLEAN && result.exit_code == 0) &&
+    if (ok && facts->batch_budget && !(result.outcome == CBM_PROC_CLEAN && result.exit_code == 0) &&
         !(allow_exit_one && result.outcome == CBM_PROC_EXIT_NONZERO && result.exit_code == 1)) {
         ok = gf_error(error, CBM_GIT_FACTS_COMMAND, "Git command failed");
         gf_command_diagnostic(error, &captured);
@@ -621,8 +618,8 @@ static bool gf_line(const cbm_git_bytes_t *bytes, const unsigned char **text, si
 }
 
 static bool gf_active_line(cbm_git_facts_t *facts, const cbm_git_bytes_t *bytes,
-                            const unsigned char **text, size_t *length,
-                            cbm_git_facts_error_t *error) {
+                           const unsigned char **text, size_t *length,
+                           cbm_git_facts_error_t *error) {
     if (!facts->batch_budget)
         return gf_line(bytes, text, length) ||
                gf_error(error, CBM_GIT_FACTS_COMMAND, "Malformed Git metadata line");
@@ -754,14 +751,14 @@ static bool gf_topology_guard(cbm_git_facts_t *facts, cbm_git_facts_error_t *err
  * No graft parsing or environment mutation; uncertain files block proof. */
 static bool gf_history_file_absent_or_empty(const char *path, cbm_git_facts_error_t *error) {
 #ifdef _WIN32
-    wchar_t *wide = cbm_path_to_wide(path);
+    wchar_t *wide = cbm_path_to_wide_in(CBM_MEM_CLASS_OTHER, path);
     if (!wide)
         return gf_error(error, CBM_GIT_FACTS_IO, "Cannot inspect Git history override path");
     HANDLE file =
         CreateFileW(wide, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                     NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
     DWORD open_error = GetLastError();
-    free(wide);
+    cbm_free(CBM_MEM_CLASS_OTHER, wide);
     if (file == INVALID_HANDLE_VALUE) {
         if (open_error == ERROR_FILE_NOT_FOUND || open_error == ERROR_PATH_NOT_FOUND)
             return true;
@@ -804,8 +801,8 @@ static bool gf_history_guard(cbm_git_facts_t *facts, cbm_git_facts_error_t *erro
     for (int i = 0; i < 2; i++) {
         if (i == 1) {
             bool equal;
-            if (!gf_metadata_equal(facts, facts->graft_paths[0], facts->graft_paths[1],
-                                   &equal, error))
+            if (!gf_metadata_equal(facts, facts->graft_paths[0], facts->graft_paths[1], &equal,
+                                   error))
                 return false;
             if (equal)
                 continue;
@@ -1143,15 +1140,14 @@ static bool gf_inventory_compare(cbm_git_facts_t *facts, const cbm_git_tree_entr
         }
         at += chunk;
     }
-    *comparison = a->path_length < b->path_length ? -1 :
-                  a->path_length > b->path_length ? 1 : 0;
+    *comparison = a->path_length < b->path_length ? -1 : a->path_length > b->path_length ? 1 : 0;
     return true;
 }
 
 /* In-place heapsort: deterministic byte order, no recursive stack or hidden
  * allocation, and request gates during comparisons and each extraction. */
-static bool gf_inventory_sift(cbm_git_facts_t *facts, cbm_git_tree_entry_t *entries,
-                              size_t root, size_t count, cbm_git_facts_error_t *error) {
+static bool gf_inventory_sift(cbm_git_facts_t *facts, cbm_git_tree_entry_t *entries, size_t root,
+                              size_t count, cbm_git_facts_error_t *error) {
     while (root < count / 2) {
         size_t child = root * 2 + 1;
         int cmp;
@@ -1173,8 +1169,8 @@ static bool gf_inventory_sift(cbm_git_facts_t *facts, cbm_git_tree_entry_t *entr
     return true;
 }
 
-static bool gf_inventory_sort(cbm_git_facts_t *facts, cbm_git_tree_entry_t *entries,
-                              size_t count, cbm_git_facts_error_t *error) {
+static bool gf_inventory_sort(cbm_git_facts_t *facts, cbm_git_tree_entry_t *entries, size_t count,
+                              cbm_git_facts_error_t *error) {
     for (size_t i = count / 2; i > 0; i--)
         if (!gf_inventory_sift(facts, entries, i - 1, count, error))
             return false;
@@ -1198,7 +1194,7 @@ static bool gf_inventory_sort(cbm_git_facts_t *facts, cbm_git_tree_entry_t *entr
 }
 
 bool cbm_git_facts_inventory(cbm_git_facts_t *facts, cbm_git_revision_t revision,
-                              cbm_git_tree_inventory_t *out, cbm_git_facts_error_t *error) {
+                             cbm_git_tree_inventory_t *out, cbm_git_facts_error_t *error) {
     cbm_git_facts_error_t local;
     if (!error)
         error = &local;
@@ -1445,8 +1441,7 @@ static bool gf_ancestor_names_valid(cbm_git_facts_t *facts, const cbm_git_bytes_
         if (!gf_gate(facts, error))
             return false;
         if (bytes->length - at < 3 || bytes->data[at + 1] != '\0')
-            return gf_error(error, CBM_GIT_FACTS_COMMAND,
-                            "Malformed ancestor changed-path record");
+            return gf_error(error, CBM_GIT_FACTS_COMMAND, "Malformed ancestor changed-path record");
         unsigned char status = bytes->data[at];
         if (status != 'A' && status != 'M' && status != 'D' && status != 'T')
             return gf_error(error, CBM_GIT_FACTS_COMMAND,
@@ -1471,8 +1466,7 @@ static bool gf_ancestor_names_valid(cbm_git_facts_t *facts, const cbm_git_bytes_
             at += chunk;
         }
         if (!terminated)
-            return gf_error(error, CBM_GIT_FACTS_COMMAND,
-                            "Truncated ancestor changed-path record");
+            return gf_error(error, CBM_GIT_FACTS_COMMAND, "Truncated ancestor changed-path record");
         if (!gf_gate(facts, error) ||
             !gf_inventory_path(facts, bytes->data + start, end - start, error))
             return false;
@@ -1483,7 +1477,7 @@ static bool gf_ancestor_names_valid(cbm_git_facts_t *facts, const cbm_git_bytes_
 /* merge-base accepts peeled tags. Check the object itself before ancestry so
  * a full tag OID cannot silently stand in for the admitted artifact commit. */
 static bool gf_ancestor_commit_type(cbm_git_facts_t *facts, const char *oid,
-                                   cbm_git_facts_error_t *error) {
+                                    cbm_git_facts_error_t *error) {
     const char *args[] = {"cat-file", "-t", oid};
     gf_result_t result;
     if (!gf_run(facts, args, 3, false, &result, error))
@@ -1493,8 +1487,7 @@ static bool gf_ancestor_commit_type(cbm_git_facts_t *facts, const char *oid,
     /* The longest supported response is "commit\r\n". Reject a large malformed
      * response without an unbounded scan through gf_line's line checks. */
     if (result.out.length > 8 || !gf_line(&result.out, &type, &length))
-        return gf_error(error, CBM_GIT_FACTS_COMMAND,
-                        "Malformed artifact object-type response");
+        return gf_error(error, CBM_GIT_FACTS_COMMAND, "Malformed artifact object-type response");
     if (length == 6 && memcmp(type, "commit", 6) == 0)
         return true;
     if ((length == 4 && (memcmp(type, "tree", 4) == 0 || memcmp(type, "blob", 4) == 0)) ||
@@ -1504,11 +1497,11 @@ static bool gf_ancestor_commit_type(cbm_git_facts_t *facts, const char *oid,
     return gf_error(error, CBM_GIT_FACTS_COMMAND, "Unknown artifact object-type response");
 }
 
-cbm_git_ancestor_changes_status_t cbm_git_facts_ancestor_changes(
-    cbm_git_facts_t *facts,
-    const char *artifact_oid, size_t artifact_oid_length,
-    cbm_git_bytes_t *name_status,
-    cbm_git_facts_error_t *error) {
+cbm_git_ancestor_changes_status_t cbm_git_facts_ancestor_changes(cbm_git_facts_t *facts,
+                                                                 const char *artifact_oid,
+                                                                 size_t artifact_oid_length,
+                                                                 cbm_git_bytes_t *name_status,
+                                                                 cbm_git_facts_error_t *error) {
     cbm_git_facts_error_t local;
     if (!error)
         error = &local;
@@ -1528,8 +1521,7 @@ cbm_git_ancestor_changes_status_t cbm_git_facts_ancestor_changes(
     if (strcmp(ancestor, facts->identity.merge_base) != 0) {
         if (!gf_ancestor_commit_type(facts, ancestor, error))
             return CBM_GIT_ANCESTOR_CHANGES_ERROR;
-        const char *args[] = {"merge-base", "--is-ancestor", ancestor,
-                              facts->identity.merge_base};
+        const char *args[] = {"merge-base", "--is-ancestor", ancestor, facts->identity.merge_base};
         gf_result_t result;
         if (!gf_run(facts, args, 4, true, &result, error))
             return CBM_GIT_ANCESTOR_CHANGES_ERROR;
@@ -1558,8 +1550,8 @@ cbm_git_ancestor_changes_status_t cbm_git_facts_ancestor_changes(
                            "--"};
     gf_result_t result;
     if (!gf_run(facts, names, (int)(sizeof(names) / sizeof(names[0])), false, &result, error) ||
-        !gf_ancestor_names_valid(facts, &result.out, error) ||
-        !gf_history_guard(facts, error) || !gf_gate(facts, error))
+        !gf_ancestor_names_valid(facts, &result.out, error) || !gf_history_guard(facts, error) ||
+        !gf_gate(facts, error))
         return CBM_GIT_ANCESTOR_CHANGES_ERROR;
     *name_status = result.out;
     return CBM_GIT_ANCESTOR_CHANGES_OK;
@@ -1604,8 +1596,7 @@ static bool gf_batch_gate(cbm_git_facts_t *facts, cbm_git_facts_error_t *error) 
 
 static bool gf_batch_limit(cbm_git_facts_t *facts, cbm_git_facts_error_t *error,
                            const char *message) {
-    return facts ? gf_limit(facts, error, message) :
-                   gf_error(error, CBM_GIT_FACTS_LIMIT, message);
+    return facts ? gf_limit(facts, error, message) : gf_error(error, CBM_GIT_FACTS_LIMIT, message);
 }
 
 static bool gf_batch_canonical_oid(const char *oid, size_t width) {
@@ -1625,9 +1616,8 @@ typedef struct {
 
 /* Continue validating digits after overflow so a malformed suffix is never
  * mistaken for a valid huge size. Header length includes its terminal LF. */
-static bool gf_batch_header(cbm_git_facts_t *facts, cbm_git_bytes_t capture,
-                            const char *oid, size_t width, gf_batch_header_t *header,
-                            cbm_git_facts_error_t *error) {
+static bool gf_batch_header(cbm_git_facts_t *facts, cbm_git_bytes_t capture, const char *oid,
+                            size_t width, gf_batch_header_t *header, cbm_git_facts_error_t *error) {
     *header = (gf_batch_header_t){0};
     if (!gf_batch_gate(facts, error))
         return false;
@@ -1658,9 +1648,8 @@ static bool gf_batch_header(cbm_git_facts_t *facts, cbm_git_bytes_t capture,
     return true;
 }
 
-static bool gf_batch_payload(cbm_git_facts_t *facts, cbm_git_bytes_t capture,
-                             size_t *offset, size_t size, cbm_git_bytes_t *bytes,
-                             cbm_git_facts_error_t *error) {
+static bool gf_batch_payload(cbm_git_facts_t *facts, cbm_git_bytes_t capture, size_t *offset,
+                             size_t size, cbm_git_bytes_t *bytes, cbm_git_facts_error_t *error) {
     if (size >= capture.length - *offset)
         return gf_error(error, CBM_GIT_FACTS_COMMAND, "Truncated Git batch payload");
     size_t start = *offset;
@@ -1688,15 +1677,15 @@ static bool gf_batch_capture(cbm_git_facts_t *facts, cbm_git_bytes_t capture,
         if (!gf_batch_gate(facts, error))
             return false;
         const char *oid = frames->objects ? frames->objects[i].oid : frames->oids[i];
-        cbm_git_bytes_t remaining = {capture.data ? capture.data + at : NULL,
-                                    capture.length - at};
+        cbm_git_bytes_t remaining = {capture.data ? capture.data + at : NULL, capture.length - at};
         gf_batch_header_t header;
         if (!gf_batch_header(facts, remaining, oid, frames->width, &header, error))
             return false;
         size_t size = header.size;
         bool check_size = frames->sizes || (frames->objects && frames->has_payload);
-        size_t expected = frames->sizes ? frames->sizes[i] :
-                          frames->objects ? frames->objects[i].size : 0;
+        size_t expected = frames->sizes     ? frames->sizes[i]
+                          : frames->objects ? frames->objects[i].size
+                                            : 0;
         if (check_size && size != expected)
             return gf_error(error, CBM_GIT_FACTS_COMMAND, "Git batch size changed after preflight");
         at += header.length;
@@ -1740,8 +1729,8 @@ bool cbm_git_facts_test_batch_header(cbm_git_bytes_t capture, const char *expect
 
 bool cbm_git_facts_test_batch_capture(cbm_git_bytes_t capture, size_t oid_hex_length,
                                       const char *const *expected_oids,
-                                      const size_t *expected_sizes, size_t count,
-                                      bool has_payload, cbm_git_facts_error_t *error) {
+                                      const size_t *expected_sizes, size_t count, bool has_payload,
+                                      cbm_git_facts_error_t *error) {
     cbm_git_facts_error_t local;
     if (!error)
         error = &local;
@@ -1753,8 +1742,10 @@ bool cbm_git_facts_test_batch_capture(cbm_git_bytes_t capture, size_t oid_hex_le
     for (size_t i = 0; i < count; i++)
         if (!gf_batch_canonical_oid(expected_oids[i], oid_hex_length))
             return gf_error(error, CBM_GIT_FACTS_INVALID, "Invalid expected Git batch object ID");
-    gf_batch_frames_t frames = {.width = oid_hex_length, .count = count,
-                                .oids = expected_oids, .sizes = expected_sizes,
+    gf_batch_frames_t frames = {.width = oid_hex_length,
+                                .count = count,
+                                .oids = expected_oids,
+                                .sizes = expected_sizes,
                                 .has_payload = has_payload};
     return gf_batch_capture(NULL, capture, &frames, error);
 }
@@ -1790,8 +1781,7 @@ static bool gf_batch_inventory(gf_batch_work_t *work, cbm_git_facts_error_t *err
     return gf_error(error, CBM_GIT_FACTS_INVALID, "Invalid internal pinned inventory cache");
 }
 
-static int gf_batch_pick_compare(const gf_batch_pick_t *a, const gf_batch_pick_t *b,
-                                 size_t width) {
+static int gf_batch_pick_compare(const gf_batch_pick_t *a, const gf_batch_pick_t *b, size_t width) {
     int cmp = memcmp(a->entry->oid, b->entry->oid, width);
     if (cmp)
         return cmp;
@@ -1844,7 +1834,8 @@ static bool gf_batch_selection(gf_batch_work_t *work, cbm_git_facts_error_t *err
             return false;
         size_t index = work->request->indices[i];
         if (index >= work->inventory.count)
-            return gf_error(error, CBM_GIT_FACTS_INVALID, "Git batch inventory index is out of range");
+            return gf_error(error, CBM_GIT_FACTS_INVALID,
+                            "Git batch inventory index is out of range");
         const cbm_git_tree_entry_t *entry = &work->inventory.entries[index];
         if (entry->object_type != CBM_GIT_TREE_BLOB ||
             (entry->mode != 0100644 && entry->mode != 0100755))
@@ -1857,8 +1848,8 @@ static bool gf_batch_selection(gf_batch_work_t *work, cbm_git_facts_error_t *err
         if (!gf_gate(work->facts, error))
             return false;
         size_t index = work->request->indices[i];
-        work->picks[i] = (gf_batch_pick_t){.entry = &work->inventory.entries[index],
-                                          .inventory_index = index, .position = i};
+        work->picks[i] = (gf_batch_pick_t){
+            .entry = &work->inventory.entries[index], .inventory_index = index, .position = i};
     }
     return gf_batch_sort(work, error);
 }
@@ -1908,16 +1899,19 @@ static size_t gf_batch_digits(size_t value) {
     return digits;
 }
 
-static bool gf_batch_command(gf_batch_work_t *work, size_t first, size_t count,
-                             bool payload, cbm_git_facts_error_t *error) {
-    const char *args[] = {"cat-file", payload ? "--batch=%(objectname) %(objecttype) %(objectsize)" :
-                                              "--batch-check=%(objectname) %(objecttype) %(objectsize)"};
+static bool gf_batch_command(gf_batch_work_t *work, size_t first, size_t count, bool payload,
+                             cbm_git_facts_error_t *error) {
+    const char *args[] = {"cat-file",
+                          payload ? "--batch=%(objectname) %(objecttype) %(objectsize)"
+                                  : "--batch-check=%(objectname) %(objecttype) %(objectsize)"};
     cbm_git_bytes_t input = {work->lines + first * work->line_length, count * work->line_length};
     gf_result_t result;
     if (!gf_run_input(work->facts, args, 2, false, &input, &result, error))
         return false;
-    gf_batch_frames_t frames = {.width = work->facts->identity.oid_hex_length, .count = count,
-                                .objects = work->objects + first, .has_payload = payload};
+    gf_batch_frames_t frames = {.width = work->facts->identity.oid_hex_length,
+                                .count = count,
+                                .objects = work->objects + first,
+                                .has_payload = payload};
     return gf_batch_capture(work->facts, result.out, &frames, error);
 }
 
@@ -1983,22 +1977,24 @@ static bool gf_batch_publish(gf_batch_work_t *work, cbm_git_blob_batch_t *out,
             if (!gf_gate(work->facts, error))
                 return false;
             const gf_batch_pick_t *pick = &work->picks[i];
-            items[pick->position] = (cbm_git_blob_batch_item_t){
-                .inventory_index = pick->inventory_index, .entry = pick->entry,
-                .bytes = work->objects[pick->object_index].bytes};
+            items[pick->position] =
+                (cbm_git_blob_batch_item_t){.inventory_index = pick->inventory_index,
+                                            .entry = pick->entry,
+                                            .bytes = work->objects[pick->object_index].bytes};
         }
     }
     if (!gf_history_guard(work->facts, error) || !gf_gate(work->facts, error))
         return false;
     *out = (cbm_git_blob_batch_t){.revision = work->request->revision,
                                   .commit = gf_revision(work->facts, work->request->revision),
-                                  .items = items, .count = count};
+                                  .items = items,
+                                  .count = count};
     return true;
 }
 
 static bool gf_batch_execute(cbm_git_facts_t *facts, const cbm_git_blob_batch_request_t *request,
-                             const cbm_git_blob_batch_limits_t *limits,
-                             cbm_git_blob_batch_t *out, cbm_git_facts_error_t *error) {
+                             const cbm_git_blob_batch_limits_t *limits, cbm_git_blob_batch_t *out,
+                             cbm_git_facts_error_t *error) {
     if (!gf_history_guard(facts, error))
         return false;
     if (request->count > limits->max_entries || request->count > SIZE_MAX / sizeof(size_t) ||
@@ -2025,8 +2021,8 @@ bool cbm_git_facts_read_blob_batch(cbm_git_facts_t *facts,
     gf_error_clear(error);
     if (out)
         memset(out, 0, sizeof(*out));
-    if (!facts || !request || !limits || !out || !limits->max_entries ||
-        !limits->max_input_bytes || !limits->max_arena_bytes ||
+    if (!facts || !request || !limits || !out || !limits->max_entries || !limits->max_input_bytes ||
+        !limits->max_arena_bytes ||
         (request->revision != CBM_GIT_REV_HEAD && request->revision != CBM_GIT_REV_MERGE_BASE) ||
         (request->count && !request->indices) || facts->batch_budget)
         return gf_error(error, CBM_GIT_FACTS_INVALID, "Invalid pinned Git blob batch request");

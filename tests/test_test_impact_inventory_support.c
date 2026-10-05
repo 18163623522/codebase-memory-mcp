@@ -128,16 +128,28 @@ bool ni_start(if_native *n) {
     return if_native_start(n) && ni_dependency(n, CBM_GIT_REV_HEAD);
 }
 
-bool ni_replace_snapshot(if_native *n, bool empty_controls) {
+bool ni_reset_input(if_native *n) {
     if (!if_native_close(n))
         return false;
     cbm_git_facts_free(n->facts);
     n->facts = NULL;
     if_init(&n->input);
+    return true;
+}
+
+bool ni_replace_snapshot(if_native *n, bool empty_controls) {
+    if (!ni_reset_input(n))
+        return false;
     if (empty_controls &&
         (!if_text(&n->input, ".cbmignore", "") || !if_text(&n->input, ".gitignore", "") ||
          !if_text(&n->input, "source.c", "int source;\n")))
         return false;
+    return ni_commit_input(n);
+}
+
+/* Commit exactly n->input's files as HEAD, then open its facts, pinned tree
+ * and dependency. Mode 100755 for the third file, as the default fixture. */
+bool ni_commit_input(if_native *n) {
     const char *clear[] = {"read-tree", "--empty", NULL};
     if (!if_native_git(n, clear, NULL, 0))
         return false;

@@ -26,9 +26,9 @@ typedef enum {
 
 typedef struct {
     cbm_inventory_status_t status;
-    size_t file_index; /* SIZE_MAX unless a particular input row is known. */
+    size_t file_index;     /* SIZE_MAX unless a particular input row is known. */
     bool cleanup_required; /* Independent provider cleanup obligation. */
-    char diagnostic[256]; /* Owned bounded generic text, no input contents. */
+    char diagnostic[256];  /* Owned bounded generic text, no input contents. */
 } cbm_inventory_error_t;
 
 typedef struct {
@@ -38,28 +38,28 @@ typedef struct {
 
 typedef struct {
     cbm_inventory_path_t path; /* data[length]==0; no earlier NUL. */
-    uint32_t git_mode; /* 0100644 or 0100755. */
-    char oid[65]; /* First NUL at 40 or 64; preceding lowercase hex only. */
+    uint32_t git_mode;         /* 0100644 or 0100755. */
+    char oid[65];              /* First NUL at 40 or 64; preceding lowercase hex only. */
     uint64_t content_length;
     unsigned char content_sha256[32];
 } cbm_inventory_file_t;
 
 typedef struct {
-    uint64_t deadline_ms; /* Positive absolute cbm_now_ms deadline. */
+    uint64_t deadline_ms;             /* Positive absolute cbm_now_ms deadline. */
     bool (*cancelled)(void *context); /* Optional prompt, pure, non-reentrant. */
-    void *context; /* Borrowed only until prepare returns. */
+    void *context;                    /* Borrowed only until prepare returns. */
 } cbm_inventory_control_t;
 
 typedef struct {
-    size_t max_files; /* Positive, <=INT_MAX; complete inventory, not survivors. */
-    size_t max_directories; /* Positive, <=INT_MAX; root plus proper prefixes. */
-    size_t max_arena_bytes; /* Total cumulative logical requests/reservations. */
+    size_t max_files;              /* Positive, <=INT_MAX; complete inventory, not survivors. */
+    size_t max_directories;        /* Positive, <=INT_MAX; root plus proper prefixes. */
+    size_t max_arena_bytes;        /* Total cumulative logical requests/reservations. */
     size_t max_ignore_arena_bytes; /* Positive reserved slice <= total. */
     size_t max_control_file_bytes;
     uint64_t max_control_total_bytes;
-    size_t max_ignore_patterns; /* Positive, <=INT_MAX. */
+    size_t max_ignore_patterns;    /* Positive, <=INT_MAX. */
     size_t max_probe_prefix_bytes; /* Copied/validated; unused before language. */
-    uint64_t max_ignore_work; /* Exclusive checked parse+match allowance. */
+    uint64_t max_ignore_work;      /* Exclusive checked parse+match allowance. */
     uint64_t max_verified_file_reads;
     uint64_t max_verified_content_bytes;
 } cbm_inventory_limits_t;
@@ -69,9 +69,11 @@ typedef struct {
  * Serial; all inputs borrowed. An error may require caller-owned native cleanup.
  * This callback type cannot authenticate a synthetic provider.
  */
-typedef cbm_inventory_status_t (*cbm_inventory_read_fn)(
-    void *context, size_t file_index, unsigned char *prefix, size_t capacity,
-    size_t *copied, const cbm_inventory_control_t *control, cbm_inventory_error_t *error);
+typedef cbm_inventory_status_t (*cbm_inventory_read_fn)(void *context, size_t file_index,
+                                                        unsigned char *prefix, size_t capacity,
+                                                        size_t *copied,
+                                                        const cbm_inventory_control_t *control,
+                                                        cbm_inventory_error_t *error);
 
 typedef struct {
     const char *native_root;
@@ -128,7 +130,7 @@ typedef enum {
 typedef struct {
     cbm_inventory_control_kind_t kind;
     cbm_inventory_path_t directory; /* Empty root or reached directory. */
-    size_t file_index; /* SIZE_MAX iff ABSENT. */
+    size_t file_index;              /* SIZE_MAX iff ABSENT. */
     cbm_inventory_control_outcome_t outcome;
     size_t effective_patterns;
 } cbm_inventory_control_row_t;
@@ -142,7 +144,7 @@ typedef struct {
     size_t ignore_patterns_reserved;
     size_t ignore_arena_requested_bytes;
     size_t non_ignore_arena_requested_bytes;
-    size_t arena_requested_bytes; /* D+C actual logical requests. */
+    size_t arena_requested_bytes;   /* D+C actual logical requests. */
     size_t arena_budget_used_bytes; /* D+I unavailable quota. */
 } cbm_inventory_filter_usage_t;
 
@@ -152,7 +154,7 @@ typedef struct {
     const char *native_root;
     const cbm_inventory_file_t *files;
     const cbm_inventory_filter_row_t *rows;
-    size_t file_count; /* Exactly the complete input count. */
+    size_t file_count;      /* Exactly the complete input count. */
     size_t directory_count; /* Includes excluded directories and root. */
     const cbm_inventory_control_row_t *controls;
     size_t control_count;
@@ -168,10 +170,11 @@ typedef struct {
  * retains neither callbacks nor caller contexts. Failure: out==NULL, no partial
  * view. Native cleanup remains the provider caller's responsibility.
  */
-cbm_inventory_status_t cbm_inventory_filter_prepare(
-    const cbm_inventory_source_t *source, const cbm_inventory_limits_t *limits,
-    const cbm_inventory_control_t *control, cbm_inventory_filter_t **out,
-    cbm_inventory_error_t *error);
+cbm_inventory_status_t cbm_inventory_filter_prepare(const cbm_inventory_source_t *source,
+                                                    const cbm_inventory_limits_t *limits,
+                                                    const cbm_inventory_control_t *control,
+                                                    cbm_inventory_filter_t **out,
+                                                    cbm_inventory_error_t *error);
 
 /* Borrowed read-only view until free; NULL for NULL. No IO/poll/allocation. */
 const cbm_inventory_filter_view_t *cbm_inventory_filter_view(const cbm_inventory_filter_t *owner);
@@ -181,8 +184,7 @@ const cbm_inventory_filter_view_t *cbm_inventory_filter_view(const cbm_inventory
  */
 bool cbm_inventory_filter_usage(const cbm_inventory_filter_t *owner,
                                 cbm_inventory_filter_usage_t *out);
-bool cbm_inventory_filter_limits(const cbm_inventory_filter_t *owner,
-                                 cbm_inventory_limits_t *out);
+bool cbm_inventory_filter_limits(const cbm_inventory_filter_t *owner, cbm_inventory_limits_t *out);
 
 /* NULL-safe; frees checked owner before the containing arena; no callback/IO. */
 void cbm_inventory_filter_free(cbm_inventory_filter_t *owner);

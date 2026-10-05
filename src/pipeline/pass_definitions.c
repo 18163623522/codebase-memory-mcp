@@ -25,6 +25,7 @@ enum { PD_JSON_FIELD_OVERHEAD = 6 };
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"
 #include "foundation/limits.h"
+#include "foundation/mem_core.h"
 #include "foundation/str_util.h"
 #include "cbm.h"
 #include "arena.h"
@@ -256,9 +257,9 @@ static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def)
      * dump. Gate the block to functions; other labels keep the lean base. */
     const bool is_fn =
         def->label && (strcmp(def->label, "Function") == 0 || strcmp(def->label, "Method") == 0);
-    const char *test_role = def->test_role == CBM_TEST_ROLE_CASE ? ",\"test_role\":\"case\""
+    const char *test_role = def->test_role == CBM_TEST_ROLE_CASE    ? ",\"test_role\":\"case\""
                             : def->test_role == CBM_TEST_ROLE_SUITE ? ",\"test_role\":\"suite\""
-                                                                   : "";
+                                                                    : "";
     int n;
     if (is_fn) {
         n = snprintf(buf, bufsize,
@@ -279,7 +280,8 @@ static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def)
                      "{\"complexity\":%d,\"lines\":%d,\"is_exported\":%s,\"is_test\":%s,"
                      "\"is_entry_point\":%s%s",
                      def->complexity, def->lines, def->is_exported ? "true" : "false",
-                     def->is_test ? "true" : "false", def->is_entry_point ? "true" : "false", test_role);
+                     def->is_test ? "true" : "false", def->is_entry_point ? "true" : "false",
+                     test_role);
     }
 
     if (n <= 0 || (size_t)n >= bufsize) {
@@ -754,7 +756,8 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
     CBMFileResult **local_cache = ctx->result_cache;
     bool owns_local_cache = false;
     if (!local_cache) {
-        local_cache = (CBMFileResult **)calloc((size_t)file_count, sizeof(CBMFileResult *));
+        local_cache = (CBMFileResult **)cbm_calloc(CBM_MEM_CLASS_EXTRACT,
+                                                   (size_t)file_count * sizeof(CBMFileResult *));
         owns_local_cache = (local_cache != NULL);
     }
 
@@ -773,7 +776,7 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
                         cbm_free_result(local_cache[j]);
                     }
                 }
-                free(local_cache);
+                cbm_free(CBM_MEM_CLASS_EXTRACT, local_cache);
             }
             return CBM_NOT_FOUND;
         }
@@ -839,14 +842,14 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
         /* Studio Export XML is transformed to one cacheable aggregate so later
          * passes see the same calls/usages/semantic carriers as native UDL. */
         CBMFileResult *result =
-            cbm_pipeline_test_force_extract_null(ctx, lang) ? NULL :
-            lang == CBM_LANG_OBJECTSCRIPT_EXPORT
+            cbm_pipeline_test_force_extract_null(ctx, lang) ? NULL
+            : lang == CBM_LANG_OBJECTSCRIPT_EXPORT
                 ? cbm_pipeline_extract_objectscript_export(source, source_len, ctx->project_name,
                                                            rel, ctx->macro_table, NULL)
-                : cbm_extract_file_ex_with_tests(
-                      source, source_len, lang, ctx->project_name, rel, CBM_EXTRACT_BUDGET, NULL,
-                      NULL /* no extra defines or include paths */, ctx->macro_table, NULL,
-                      ctx->test_declarations);
+                : cbm_extract_file_ex_with_tests(source, source_len, lang, ctx->project_name, rel,
+                                                 CBM_EXTRACT_BUDGET, NULL,
+                                                 NULL /* no extra defines or include paths */,
+                                                 ctx->macro_table, NULL, ctx->test_declarations);
         free(source);
 
         if (!cbm_pipeline_test_extraction_ok(ctx, lang, result)) {
@@ -880,6 +883,14 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
             cbm_pipeline_add_file_error(
                 ctx->pipeline, rel, result->error_ranges ? result->error_ranges : "unknown",
                 result->parse_unusable ? "parse_unusable" : "parse_partial");
+        }
+        if (result->test_declarations_degraded) {
+            /* Its configured test forms could not be mapped: indexed without
+             * configured test roles (degraded per file, not the index). */
+            cbm_pipeline_add_file_error(
+                ctx->pipeline, rel,
+                cbm_test_extract_status_message(result->test_declarations_degraded_status),
+                "test_declarations");
         }
 
         /* Create nodes for each definition */
@@ -943,7 +954,7 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
                     cbm_free_result(local_cache[i]);
                 }
             }
-            free(local_cache);
+            cbm_free(CBM_MEM_CLASS_EXTRACT, local_cache);
         }
     }
 
@@ -957,7 +968,7 @@ configured_failure:
         for (int j = 0; j < file_count; j++) {
             cbm_free_result(local_cache[j]);
         }
-        free(local_cache);
+        cbm_free(CBM_MEM_CLASS_EXTRACT, local_cache);
     }
     return CBM_PIPELINE_ABORT_PRESERVE_DB;
 }

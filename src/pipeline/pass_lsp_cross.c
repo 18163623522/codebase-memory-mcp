@@ -16,6 +16,7 @@
 #include "pipeline/pass_lsp_cross.h"
 
 #include "pipeline/lsp_surface.h"
+#include "foundation/mem_core.h"
 #include "result_spill.h"
 #include "pipeline/pipeline_internal.h"
 #include "pipeline/lsp_resolve.h"
@@ -613,7 +614,7 @@ CBMLSPDef *cbm_pxc_collect_all_defs(const cbm_pipeline_ctx_t *ctx, CBMArena *are
              * first actual collector spilled-load boundary, without timing. */
 #if defined(CBM_ENABLE_TEST_SEAMS) && CBM_ENABLE_TEST_SEAMS
             bool force_null = owner_walk_required && ctx &&
-                (ctx->test_fault_mask & CBM_PIPELINE_TEST_FAULT_COLLECT_SPILL_NULL);
+                              (ctx->test_fault_mask & CBM_PIPELINE_TEST_FAULT_COLLECT_SPILL_NULL);
             fr = force_null ? NULL : cbm_result_spill_load(spill, fi);
 #else
             fr = cbm_result_spill_load(spill, fi);
@@ -1332,9 +1333,9 @@ void cbm_pxc_run_one(CBMLanguage lang, CBMFileResult *r, const char *source, int
          * resolution as a separate map, so pass NULL/0 and let the LSP
          * fall back to its own #include scan. */
         if (r->has_test_definition_owners) {
-            if (!cbm_run_c_lsp_cross_with_test_owners(
-                    &scratch, source, source_len, module_qn, cpp_mode, defs, def_count,
-                    NULL, NULL, 0, tree, &out, CBM_SOURCE_ORIGIN_RAW, r)) {
+            if (!cbm_run_c_lsp_cross_with_test_owners(&scratch, source, source_len, module_qn,
+                                                      cpp_mode, defs, def_count, NULL, NULL, 0,
+                                                      tree, &out, CBM_SOURCE_ORIGIN_RAW, r)) {
                 cbm_pipeline_test_owner_error(r);
                 pxc_scratch_give(PXC_SCRATCH_DISPATCH, &scratch);
                 return; /* out may be partial: never append it */
@@ -1510,17 +1511,17 @@ void cbm_pxc_dispatch_file(CBMLanguage lang, CBMFileResult *result, const char *
         case CBM_LANG_CUDA:
             if (result->has_test_definition_owners) {
                 if (!cbm_run_c_lsp_cross_with_registry_with_test_owners(
-                        &scratch, source, source_len, def_module, (lang != CBM_LANG_C),
-                        &overlay, imp_keys, imp_vals, imp_count, result->cached_tree,
-                        &out, CBM_SOURCE_ORIGIN_RAW, result)) {
+                        &scratch, source, source_len, def_module, (lang != CBM_LANG_C), &overlay,
+                        imp_keys, imp_vals, imp_count, result->cached_tree, &out,
+                        CBM_SOURCE_ORIGIN_RAW, result)) {
                     cbm_pipeline_test_owner_error(result);
                     pxc_scratch_give(PXC_SCRATCH_DISPATCH, &scratch);
                     return; /* no append and no fallback on an invalid proof */
                 }
             } else {
                 cbm_run_c_lsp_cross_with_registry(&scratch, source, source_len, def_module,
-                                                  (lang != CBM_LANG_C), &overlay, imp_keys, imp_vals,
-                                                  imp_count, result->cached_tree, &out);
+                                                  (lang != CBM_LANG_C), &overlay, imp_keys,
+                                                  imp_vals, imp_count, result->cached_tree, &out);
             }
             used_prebuilt = true;
             break;
@@ -1692,9 +1693,8 @@ int cbm_pipeline_pass_lsp_cross(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *
     }
     bool owner_walk_required = atomic_load(&ctx->test_definition_owners_seen) != 0;
     char cross_disabled[CBM_SZ_16];
-    if (owner_walk_required &&
-        cbm_safe_getenv("CBM_DISABLE_LSP_CROSS", cross_disabled,
-                        sizeof(cross_disabled), NULL) != NULL) {
+    if (owner_walk_required && cbm_safe_getenv("CBM_DISABLE_LSP_CROSS", cross_disabled,
+                                               sizeof(cross_disabled), NULL) != NULL) {
         atomic_store(&ctx->test_declarations_failed, 1);
         return CBM_PIPELINE_ABORT_PRESERVE_DB;
     }
@@ -1709,8 +1709,9 @@ int cbm_pipeline_pass_lsp_cross(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *
 
     /* Per-file module QN cache so we don't recompute it once per def + once
      * per call. cbm_pipeline_fqn_module mallocs; freed at end. */
-    char **def_modules = cbm_pipeline_test_force_def_modules_null(ctx) ? NULL :
-        (char **)calloc((size_t)file_count, sizeof(char *));
+    char **def_modules = cbm_pipeline_test_force_def_modules_null(ctx)
+                             ? NULL
+                             : (char **)calloc((size_t)file_count, sizeof(char *));
     if (!def_modules) {
         cbm_log_error("pass.err", "pass", "lsp_cross", "phase", "alloc");
         if (have_rust) {
@@ -1725,7 +1726,8 @@ int cbm_pipeline_pass_lsp_cross(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *
     }
 
     int def_count = 0;
-    int *def_starts = (int *)calloc((size_t)file_count + 1, sizeof(int));
+    int *def_starts =
+        (int *)cbm_calloc(CBM_MEM_CLASS_EXTRACT, ((size_t)file_count + 1) * sizeof(int));
     /* The defs own their strings in the caller-owned seq_cross_arena, which
      * the registries and later passes already borrow from (see below). */
     if (!ctx->seq_cross_arena_live) {
@@ -1737,7 +1739,7 @@ int cbm_pipeline_pass_lsp_cross(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *
                                  ctx->project_name, def_modules, &def_count, def_starts);
     if (def_count < 0 || (owner_walk_required && (!all_defs || def_count <= 0))) {
         atomic_store(&ctx->test_declarations_failed, 1);
-        free(def_starts);
+        cbm_free(CBM_MEM_CLASS_EXTRACT, def_starts);
         free(all_defs);
         for (int i = 0; i < file_count; i++) {
             free(def_modules[i]);
@@ -1760,7 +1762,7 @@ int cbm_pipeline_pass_lsp_cross(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *
             cbm_pipeline_set_lsp_surfaces(ctx->pipeline, surface_rows, surface_count);
         }
     }
-    free(def_starts);
+    cbm_free(CBM_MEM_CLASS_EXTRACT, def_starts);
 
     /* Shared prepare (mirrors run_parallel_pipeline): inverted module-def
      * index + per-language shared registries, built ONCE for the whole pass.
@@ -1882,8 +1884,7 @@ int cbm_pipeline_pass_lsp_cross(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *
                  "files_skipped_no_lsp", itoa_buf(skipped_no_lsp), "files_skipped_no_source",
                  itoa_buf(skipped_no_source), "defs_total", itoa_buf(def_count), "lsp_calls",
                  itoa_buf(per_lang_calls));
-    return atomic_load(&ctx->test_declarations_failed)
-               ? CBM_PIPELINE_ABORT_PRESERVE_DB : 0;
+    return atomic_load(&ctx->test_declarations_failed) ? CBM_PIPELINE_ABORT_PRESERVE_DB : 0;
 }
 
 /* ── Per-module def index (gopls "package summary" pattern) ──── */
@@ -2129,7 +2130,8 @@ CBMLSPDef *cbm_pxc_filter_defs_for_file(const CBMModuleDefIndex *idx, CBMLSPDef 
         return NULL;
     }
 
-    bool *selected = (bool *)calloc((size_t)idx->def_count, sizeof(*selected));
+    bool *selected =
+        (bool *)cbm_calloc(CBM_MEM_CLASS_EXTRACT, (size_t)idx->def_count * sizeof(*selected));
     if (!selected) {
         return NULL;
     }
@@ -2146,14 +2148,14 @@ CBMLSPDef *cbm_pxc_filter_defs_for_file(const CBMModuleDefIndex *idx, CBMLSPDef 
     }
 
     if (total == 0) {
-        free(selected);
+        cbm_free(CBM_MEM_CLASS_EXTRACT, selected);
         *out_success = true;
         return NULL;
     }
 
     CBMLSPDef *out = (CBMLSPDef *)malloc((size_t)total * sizeof(CBMLSPDef));
     if (!out) {
-        free(selected);
+        cbm_free(CBM_MEM_CLASS_EXTRACT, selected);
         return NULL;
     }
 
@@ -2165,6 +2167,6 @@ CBMLSPDef *cbm_pxc_filter_defs_for_file(const CBMModuleDefIndex *idx, CBMLSPDef 
     }
     *out_count = n;
     *out_success = true;
-    free(selected);
+    cbm_free(CBM_MEM_CLASS_EXTRACT, selected);
     return out;
 }

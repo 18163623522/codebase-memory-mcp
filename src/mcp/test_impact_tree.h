@@ -80,6 +80,11 @@ typedef struct {
     size_t file_count;
     size_t directory_count; /* root plus unique proper path prefixes */
     uint64_t total_content_bytes;
+    /* Symlink (0120000) and submodule (0160000) entries of the revision. They
+     * are not materialized and not in `files`: discovery never indexes a
+     * symlink, and a submodule's content is not in this repository. Any other
+     * non-regular entry still fails the pin. */
+    size_t skipped_link_count;
     unsigned char manifest_sha256[32]; /* exact framing in normative text */
 } cbm_pinned_tree_view_t;
 

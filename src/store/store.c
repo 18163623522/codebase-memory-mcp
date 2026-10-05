@@ -115,7 +115,7 @@ static int bind_text(sqlite3_stmt *s, int col, const char *v) {
 struct cbm_store {
     sqlite3 *db;
     const void *progress_owner; /* exclusive native progress guard token */
-    const char *db_path; /* heap-allocated, or NULL for :memory: */
+    const char *db_path;        /* heap-allocated, or NULL for :memory: */
     char errbuf[CBM_SZ_512];
 
     /* Prepared statements (lazily initialized, cached for lifetime) */
@@ -1342,7 +1342,7 @@ int cbm_store_rollback(cbm_store_t *s) {
  * for an externally installed handler; direct replacement during this borrow
  * is outside the request-owned connection contract. */
 static bool store_progress_acquire(cbm_store_t *s, const void *owner, int interval,
-                                    int (*callback)(void *), void *context) {
+                                   int (*callback)(void *), void *context) {
     if (!s || !s->db || !owner || s->progress_owner) {
         return false;
     }
@@ -1460,7 +1460,8 @@ static int store_scope_cleanup(cbm_store_read_scope_t *scope) {
         scope->transaction = false;
     }
     if (scope->query_only_changed && scope->query_only_saved) {
-        const char *sql = scope->saved_query_only ? "PRAGMA query_only=ON;" : "PRAGMA query_only=OFF;";
+        const char *sql =
+            scope->saved_query_only ? "PRAGMA query_only=ON;" : "PRAGMA query_only=OFF;";
         int restored = -1;
         if (exec_sql(s, sql) != CBM_STORE_OK ||
             !store_scope_pragma_get(s, "PRAGMA query_only;", &restored) ||
@@ -1548,8 +1549,8 @@ int cbm_store_read_scope_open(cbm_store_t *s, cbm_store_cancel_fn cancel, void *
     }
     /* BEGIN alone is not a snapshot. This real main-table read opens one even
      * for an empty graph; finalizing the statement retains the transaction. */
-    if (sqlite3_prepare_v2(s->db, "SELECT id FROM main.nodes LIMIT 1;", CBM_NOT_FOUND,
-                           &scope->pin, NULL) != SQLITE_OK) {
+    if (sqlite3_prepare_v2(s->db, "SELECT id FROM main.nodes LIMIT 1;", CBM_NOT_FOUND, &scope->pin,
+                           NULL) != SQLITE_OK) {
         goto fail;
     }
     int step = sqlite3_step(scope->pin);
@@ -1985,12 +1986,12 @@ int cbm_store_compare_graphs(cbm_store_t *base_store, const char *base_project,
     bool base_transaction = false;
     bool target_transaction = false;
     int progress_interval = graph_compare_progress_interval();
-    if (!store_progress_acquire(base_store, &progress, progress_interval,
-                                 graph_compare_progress, &progress)) {
+    if (!store_progress_acquire(base_store, &progress, progress_interval, graph_compare_progress,
+                                &progress)) {
         return CBM_STORE_ERR;
     }
-    if (!store_progress_acquire(target_store, &progress, progress_interval,
-                                 graph_compare_progress, &progress)) {
+    if (!store_progress_acquire(target_store, &progress, progress_interval, graph_compare_progress,
+                                &progress)) {
         store_progress_release(base_store, &progress);
         return CBM_STORE_ERR;
     }

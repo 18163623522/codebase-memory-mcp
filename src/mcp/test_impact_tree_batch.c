@@ -4,9 +4,9 @@ static bool tpt_batch_row(tpt_context *c, const cbm_git_blob_batch_item_t *item,
     cbm_pinned_tree_t *t = c->tree;
     cbm_pinned_tree_file_t *file = &t->files[index];
     const cbm_git_tree_entry_t *e = item->entry;
-    if (!e || !e->path || item->inventory_index != index || e->object_type != CBM_GIT_TREE_BLOB ||
-        e->mode != file->git_mode || e->path_length != file->path_length ||
-        !tpt_oid(c, e->oid, t->identity.oid_hex_length))
+    if (!e || !e->path || item->inventory_index != t->indices[index] ||
+        e->object_type != CBM_GIT_TREE_BLOB || e->mode != file->git_mode ||
+        e->path_length != file->path_length || !tpt_oid(c, e->oid, t->identity.oid_hex_length))
         return tpt_fail(c, CBM_PINNED_TREE_GIT, "batch row identity");
     if (!tpt_equal(c, e->path, file->path, file->path_length) ||
         !tpt_equal(c, e->oid, file->oid, t->identity.oid_hex_length + 1) ||

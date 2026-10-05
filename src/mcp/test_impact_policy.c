@@ -591,6 +591,9 @@ static const char *const tp_ci_paths[] = {".github/**",   ".gitlab-ci.yml", ".ci
                                           "Jenkinsfile*", ".buildkite/**",  "azure-pipelines*.yml"};
 static const char *const tp_vendor_paths[] = {"vendor*/**", "third_party/**"};
 static const char *const tp_conftest_paths[] = {"conftest.py"};
+/* The selection's own configuration: a change to it may loosen what it
+ * selects, so it runs everything (smart-ci-design review M-4). */
+static const char *const tp_config_paths[] = {".codebase-memory.json"};
 static const char *const tp_documentation_paths[] = {"docs/**", "**/*.md", "LICENSE*"};
 
 typedef struct {
@@ -602,6 +605,8 @@ typedef struct {
 
 #define TP_COUNT(array) (sizeof(array) / sizeof((array)[0]))
 static const tp_builtin_t tp_builtins[] = {
+    {"builtin:test-impact-config", CBM_TEST_RULE_RUN_ALL, tp_config_paths,
+     TP_COUNT(tp_config_paths)},
     {"builtin:build", CBM_TEST_RULE_RUN_ALL, tp_build_paths, TP_COUNT(tp_build_paths)},
     {"builtin:ci", CBM_TEST_RULE_RUN_ALL, tp_ci_paths, TP_COUNT(tp_ci_paths)},
     {"builtin:vendor", CBM_TEST_RULE_RUN_ALL, tp_vendor_paths, TP_COUNT(tp_vendor_paths)},

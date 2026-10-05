@@ -82,7 +82,7 @@ static bool tir_lane_plan_build(tir_context *c, size_t index, tir_lane_plan *pla
         if (!lane->source->narrow)
             plan->reasons |= TIR_REASON(TIR_REASON_NARROW_DISABLED);
         if (!c->input->inventory_complete || !c->input->model ||
-            !cbm_test_model_complete(c->input->model)) {
+            !cbm_test_model_narrowable(c->input->model)) {
             plan->suites = tir_null(c);
             return plan->suites != NULL;
         }

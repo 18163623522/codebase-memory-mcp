@@ -135,7 +135,7 @@ cbm_test_selection_t *cbm_test_select(const cbm_test_selection_input_t *input) {
     if (!input->has_changes)
         return result;
     unsigned incomplete = 0;
-    if (!input->inventory_complete || !cbm_test_model_complete(input->model))
+    if (!input->inventory_complete || !cbm_test_model_narrowable(input->model))
         incomplete |= CBM_TEST_SELECT_INVENTORY_UNKNOWN;
     if (!input->static_complete)
         incomplete |= CBM_TEST_SELECT_STATIC_INCOMPLETE;
@@ -207,7 +207,7 @@ cbm_test_selection_t *cbm_test_select(const cbm_test_selection_input_t *input) {
         int at = sl_suite_find(result->suites, runner_count, definitions[i].name);
         if (at >= 0) {
             definition_counts[at]++;
-            if (definitions[i].macro_registrations)
+            if (definitions[i].macro_registrations || definitions[i].uncertain)
                 sl_whole(&result->suites[at], CBM_TEST_SELECT_INVENTORY_UNKNOWN);
         }
     }
@@ -235,13 +235,16 @@ cbm_test_selection_t *cbm_test_select(const cbm_test_selection_input_t *input) {
     for (int i = 0; i < registration_count; i++) {
         const cbm_test_registration_t *reg = order[i];
         int at = sl_suite_find(result->suites, runner_count, reg->suite);
-        if (at < 0)
-            return sl_full(result, CBM_TEST_SELECT_INVENTORY_UNKNOWN);
-        cbm_test_selected_suite_t *suite = &result->suites[at];
-        registration_counts[at]++;
         sl_reach_t *evidence = sl_reach_find(reach, input->reach_count, reg->file, reg->test);
         if (evidence)
             evidence->registered = true;
+        if (at < 0)
+            /* A suite this runner never registers runs elsewhere (another
+             * runner's list) or not at all: its tests are outside this
+             * selection, and a change to one is no unregistered change. */
+            continue;
+        cbm_test_selected_suite_t *suite = &result->suites[at];
+        registration_counts[at]++;
         const cbm_test_case_t *test = sl_case_find(case_order, case_count, reg->file, reg->test);
         if (!reg->resolved || !test)
             sl_whole(suite, CBM_TEST_SELECT_INVENTORY_UNKNOWN);

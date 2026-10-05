@@ -51,6 +51,10 @@ typedef struct {
     /* The file defines a macro that registers tests. The suite may then run
      * tests the model cannot name, so it can only be selected whole. */
     bool macro_registrations;
+    /* The model could not read this suite's file with certainty (for
+     * example tests defined by a macro). The suite can only run whole; other
+     * suites stay narrowable (cbm_test_model_narrowable). */
+    bool uncertain;
 } cbm_test_suite_t;
 
 typedef struct {
@@ -65,6 +69,8 @@ typedef struct {
 typedef struct {
     const char *name;
     bool perf;
+    const char *file; /* the runner file that registers it */
+    int line;
 } cbm_test_runner_suite_t;
 
 typedef struct cbm_test_model cbm_test_model_t;
@@ -90,6 +96,13 @@ void cbm_test_model_free(cbm_test_model_t *m);
  * source text only: callers must separately establish that the external
  * file/runner inventory is complete and conventions are applicable. */
 bool cbm_test_model_complete(const cbm_test_model_t *m);
+
+/* True after finish when every uncertainty the model found is scoped to the
+ * suites of the file it was found in (those suites are marked `uncertain` and
+ * can only run whole). Uncertainty in a file that registers runner suites, in
+ * a file with no suite of its own, in the configuration, or a failure keeps
+ * this false, and nothing may be narrowed. complete() implies narrowable(). */
+bool cbm_test_model_narrowable(const cbm_test_model_t *m);
 
 /* Descriptor mode is independent of the legacy six-spelling constructor.
  * Copies every original record, ordered name_args, optional template and
@@ -228,28 +241,28 @@ typedef struct {
 } cbm_coverage_profile_binding_t;
 
 typedef struct {
-    int id; /* dense 0-based; row index */
+    int id;                    /* dense 0-based; row index */
     const unsigned char *name; /* owned bytes; NOT a C-string contract */
-    size_t name_length; /* positive; embedded NUL is representable */
-    uint64_t function_hash; /* all 64 bits, without masking */
-    uint64_t counter_count; /* positive shape; no counter values stored */
+    size_t name_length;        /* positive; embedded NUL is representable */
+    uint64_t function_hash;    /* all 64 bits, without masking */
+    uint64_t counter_count;    /* positive shape; no counter values stored */
 } cbm_coverage_profile_t;
 
 typedef struct {
     uint64_t max_input_bytes; /* profiles_len + tests_len; <= UINT64_MAX/8 */
-    uint64_t max_items; /* exactly 1 header + profile rows + test rows + ID references */
-    size_t max_alloc_bytes; /* cumulative logical allocation requests, including scratch */
-    int max_ids; /* positive, <= INT_MAX; dense universe cardinality */
+    uint64_t max_items;       /* exactly 1 header + profile rows + test rows + ID references */
+    size_t max_alloc_bytes;   /* cumulative logical allocation requests, including scratch */
+    int max_ids;              /* positive, <= INT_MAX; dense universe cardinality */
 } cbm_coverage_parse_limits_t;
 
 typedef bool (*cbm_coverage_parse_cancel_fn)(void *context);
 
 typedef enum {
     CBM_COVERAGE_PARSE_OK = 0,
-    CBM_COVERAGE_PARSE_INVALID, /* bad pointers/limits, invalid C call */
-    CBM_COVERAGE_PARSE_FORMAT, /* malformed/noncanonical identities or invalid test rows */
+    CBM_COVERAGE_PARSE_INVALID,     /* bad pointers/limits, invalid C call */
+    CBM_COVERAGE_PARSE_FORMAT,      /* malformed/noncanonical identities or invalid test rows */
     CBM_COVERAGE_PARSE_UNSUPPORTED, /* well-formed recognized header, wire version != 2 */
-    CBM_COVERAGE_PARSE_LIMIT, /* byte/item/ID/logical allocation/representation limit */
+    CBM_COVERAGE_PARSE_LIMIT,       /* byte/item/ID/logical allocation/representation limit */
     CBM_COVERAGE_PARSE_CANCELLED,
     CBM_COVERAGE_PARSE_OOM
 } cbm_coverage_parse_status_t;
@@ -266,12 +279,12 @@ typedef enum {
  * OK owns all data in CBMArena storage and permits unobserved IDs explicitly.
  * OK never establishes image/universe/row completeness or artifact admission.
  * Use existing cbm_coverage_map_free; no shared mutable or cancellation state. */
-cbm_coverage_parse_status_t cbm_coverage_map_parse_v2(
-    const void *profiles, size_t profiles_len,
-    const char *tests, size_t tests_len,
-    const cbm_coverage_parse_limits_t *limits,
-    cbm_coverage_parse_cancel_fn cancelled, void *cancel_context,
-    cbm_coverage_map_t **out);
+cbm_coverage_parse_status_t cbm_coverage_map_parse_v2(const void *profiles, size_t profiles_len,
+                                                      const char *tests, size_t tests_len,
+                                                      const cbm_coverage_parse_limits_t *limits,
+                                                      cbm_coverage_parse_cancel_fn cancelled,
+                                                      void *cancel_context,
+                                                      cbm_coverage_map_t **out);
 
 /* O(1) borrowed views until map_free. NULL map -> NONE / 0 / NULL.
  * Generic count and exact digest work for formats 1 and 2. No reserialization:
@@ -286,15 +299,13 @@ const char *cbm_coverage_map_identity_sha256(const cbm_coverage_map_t *map);
  * but binding remains available. Records remain in dense ID order. */
 const cbm_coverage_profile_binding_t *cbm_coverage_map_profile_binding(
     const cbm_coverage_map_t *map);
-const cbm_coverage_profile_t *cbm_coverage_map_profiles(
-    const cbm_coverage_map_t *map, int *count);
+const cbm_coverage_profile_t *cbm_coverage_map_profiles(const cbm_coverage_map_t *map, int *count);
 
 /* Existing test/find_test/intersection/free APIs retain their row semantics.
  * On v2, old functions() returns NULL/count=0, find_function() returns NULL,
  * functions_sha256() returns NULL, metadata_matches() returns false, and
  * check_receipt() returns INVALID|METADATA before interpreting v1 evidence.
  * All format-1 behavior, uniqueness and observed-ID guards stay unchanged. */
-
 
 /* Explicit byte lengths; inputs need not be NUL-terminated. LF and CRLF are
  * accepted. NULL means invalid/incomplete syntax, inconsistent references, or

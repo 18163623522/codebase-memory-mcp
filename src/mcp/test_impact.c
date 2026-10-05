@@ -46,7 +46,8 @@ struct cbm_test_model {
     bool presets[CBM_TEST_PRESET_COUNT];
     cbm_test_model_mapping_issue_t mapping;
     bool finished;
-    bool incomplete; /* sticky: a partial scan must never justify omission */
+    bool incomplete;       /* sticky: a partial scan must never justify omission */
+    bool scoped_uncertain; /* some suite is `uncertain`; see tm_add_source */
 };
 
 const cbm_test_conventions_t *cbm_test_conventions_cbm(void) {
@@ -269,6 +270,7 @@ typedef struct {
     const char *end;
     int line;
     bool line_start;  /* only blanks so far on this line: a '#' opens a directive */
+    bool directive;   /* lexing the text of one directive, continuations included */
     bool *incomplete; /* shared by lookahead copies; restoring a cursor cannot erase an error */
 } tm_lex_t;
 
@@ -286,6 +288,21 @@ static void tm_lex_uncertain(tm_lex_t *lx) {
     }
 }
 
+/* The length of a line splice (backslash, then LF or CRLF) at p, else 0. */
+static size_t tm_splice_len(const char *p, const char *end) {
+    if (p >= end || *p != '\\') {
+        return 0;
+    }
+    if (p + 1 < end && p[1] == '\n') {
+        return 2;
+    }
+    return p + 2 < end && p[1] == '\r' && p[2] == '\n' ? 3 : 0;
+}
+
+static bool tm_blank(char c) {
+    return c == ' ' || c == '\t';
+}
+
 /* Raw strings need a delimiter-aware C++ lexer, which this model does not
  * implement. Retain the old rows for diagnostics, but never certify them. */
 static bool tm_raw_literal_starts(const char *p, const char *end) {
@@ -300,8 +317,7 @@ static void tm_skip_line_comment(tm_lex_t *lx) {
     while (lx->p < lx->end && *lx->p != '\n') {
         /* Translation-phase line splicing can extend this comment. The
          * legacy lexer does not implement it, so its rows are uncertain. */
-        if (*lx->p == '\\' && lx->p + 1 < lx->end &&
-            (lx->p[1] == '\n' || (lx->p[1] == '\r' && lx->p + 2 < lx->end && lx->p[2] == '\n'))) {
+        if (tm_splice_len(lx->p, lx->end)) {
             tm_lex_uncertain(lx);
         }
         lx->p++;
@@ -314,6 +330,9 @@ static void tm_skip_block_comment(tm_lex_t *lx) {
         if (*lx->p == '*' && lx->p + 1 < lx->end && lx->p[1] == '/') {
             lx->p += 2;
             return;
+        }
+        if (*lx->p == '*' && tm_splice_len(lx->p + 1, lx->end)) {
+            tm_lex_uncertain(lx); /* the splice may close the comment */
         }
         if (*lx->p == '\n') {
             lx->line++;
@@ -360,9 +379,19 @@ static void tm_read_directive(tm_lex_t *lx, tm_tok_t *tok) {
             tm_skip_literal(lx);
             continue;
         }
-        if (*lx->p == '\\' && lx->p + 1 < lx->end && lx->p[1] == '\n') {
+        size_t splice = tm_splice_len(lx->p, lx->end);
+        if (splice) {
+            /* Next to a blank a continuation only separates tokens; with
+             * token characters on both sides it could join them, which the
+             * re-lexing of this text (tm_directive_word) does not do. The
+             * '#' precedes the text, so p[-1] is in bounds. */
+            const char *after = lx->p + splice;
+            if (!tm_blank(lx->p[-1]) && after < lx->end && !tm_blank(*after) && *after != '\n' &&
+                *after != '\r') {
+                tm_lex_uncertain(lx);
+            }
             lx->line++;
-            lx->p += 2;
+            lx->p = after;
             continue;
         }
         if (*lx->p == '/' && lx->p + 1 < lx->end && lx->p[1] == '*') {
@@ -388,6 +417,10 @@ static void tm_next(tm_lex_t *lx, tm_tok_t *tok) {
             tm_skip_line_comment(lx);
         } else if (c == '/' && lx->p + 1 < lx->end && lx->p[1] == '*') {
             tm_skip_block_comment(lx);
+        } else if (lx->directive && tm_splice_len(lx->p, lx->end)) {
+            /* A continuation tm_read_directive already followed and judged. */
+            lx->line++;
+            lx->p += tm_splice_len(lx->p, lx->end);
         } else {
             break;
         }
@@ -399,6 +432,9 @@ static void tm_next(tm_lex_t *lx, tm_tok_t *tok) {
     char c = *lx->p;
     if (tm_raw_literal_starts(lx->p, lx->end)) {
         tm_lex_uncertain(lx);
+    }
+    if (tm_splice_len(lx->p, lx->end)) {
+        tm_lex_uncertain(lx); /* a splice in plain code can join tokens */
     }
     bool line_start = lx->line_start;
     lx->line_start = false;
@@ -594,7 +630,8 @@ static void tm_add_runner_suite(tm_scan_t *sc, const tm_tok_t *name, bool perf) 
         return;
     }
     m->runner = items;
-    items[m->runner_count++] = (cbm_test_runner_suite_t){.name = copy, .perf = perf};
+    items[m->runner_count++] =
+        (cbm_test_runner_suite_t){.name = copy, .perf = perf, .file = sc->file, .line = name->line};
 }
 
 /* Virtual preset records are immutable. Original configured records are kept
@@ -816,6 +853,15 @@ static bool tm_descriptor_ident(tm_scan_t *sc, const tm_tok_t *tok) {
     }
     if (first == -2)
         return false;
+    /* A function-like macro name not followed by '(' is not an invocation:
+     * the preprocessor leaves it alone (an array or variable that happens to
+     * carry the name), so it defines and registers nothing. An opened '('
+     * that does not close stays a malformed invocation below. */
+    tm_lex_t peek = sc->lx;
+    tm_tok_t next;
+    tm_next(&peek, &next);
+    if (!tm_tok_punct(&next, '('))
+        return false;
     tm_invocation_t invocation = {0};
     cbm_arena_init_sized(&invocation.arena, TM_INVOCATION_ARENA_BLOCK);
     int parsed = tm_invocation_parse(sc, sc->lx, &invocation);
@@ -921,8 +967,11 @@ static void tm_descriptor_macro_body(tm_scan_t *sc, const tm_tok_t *word) {
 /* The first word of a directive and what follows it. */
 static void tm_directive_word(const tm_tok_t *tok, tm_tok_t *word, tm_lex_t *rest,
                               bool *incomplete) {
-    *rest = (tm_lex_t){
-        .p = tok->text, .end = tok->text + tok->len, .line = tok->line, .incomplete = incomplete};
+    *rest = (tm_lex_t){.p = tok->text,
+                       .end = tok->text + tok->len,
+                       .line = tok->line,
+                       .directive = true,
+                       .incomplete = incomplete};
     tm_next(rest, word);
 }
 
@@ -958,13 +1007,12 @@ static void tm_directive(tm_scan_t *sc, const tm_tok_t *tok) {
             sc->m->incomplete = true;
         }
         if (tm_tok_is(&word, "ifndef")) {
-            guard = condition.kind == TM_TOK_IDENT && tm_is_include_guard(sc, &condition);
-            if (guard &&
-                (sc->seen_token || sc->depth || sc->open != TM_OPEN_NONE || sc->cond_count)) {
-                /* Keep the legacy diagnostic rows, but only certify a guard
-                 * that starts the file at outermost scope. */
-                sc->m->incomplete = true;
-            }
+            /* Only a guard that starts the file at outermost scope conditions
+             * nothing. The same pair anywhere else is the define-if-undefined
+             * idiom: an ordinary condition, so what it encloses is conditional. */
+            guard = condition.kind == TM_TOK_IDENT && !sc->seen_token && !sc->depth &&
+                    sc->open == TM_OPEN_NONE && !sc->cond_count &&
+                    tm_is_include_guard(sc, &condition);
         }
         if (sc->cond_count < TM_COND_MAX) {
             sc->cond[sc->cond_count] = (tm_cond_t){.depth = sc->depth, .guard = guard};
@@ -1154,30 +1202,18 @@ static void tm_ident(tm_scan_t *sc, const tm_tok_t *tok) {
     }
 }
 
-static bool tm_add_source(cbm_test_model_t *m, const char *file, const char *text, size_t len,
-                          int language_kind) {
-    if (!m || m->finished || !file || (!text && len > 0)) {
-        if (m) {
-            m->incomplete = true;
-        }
-        return false;
-    }
+static bool tm_scan_source(cbm_test_model_t *m, const char *file, const char *text, size_t len,
+                           int language_kind) {
     if (!text) {
         text = ""; /* (NULL, 0) is empty input, never NULL pointer arithmetic */
     }
     if (memchr(text, '\0', len)) {
         m->incomplete = true;
     }
-    /* Translation-phase splicing can join identifiers, punctuators, or
-     * comment delimiters before this lexer sees them. Without preprocessing,
-     * even an otherwise handled directive/string splice prevents certainty. */
-    for (size_t i = 0; i < len; i++) {
-        if (text[i] == '\\' && len - i >= 2 &&
-            (text[i + 1] == '\n' || (len - i >= 3 && text[i + 1] == '\r' && text[i + 2] == '\n'))) {
-            m->incomplete = true;
-            break;
-        }
-    }
+    /* Translation-phase line splicing is followed where the lexer reads it
+     * correctly (a directive's continuation lines, an escaped newline in a
+     * literal); a splice it cannot follow (in plain code, or extending a line
+     * comment) marks the file uncertain where it is met. */
     tm_scan_t sc = {.m = m, .language_kind = language_kind, .ok = true};
     int first_suite = m->suite_count;
     sc.file = cbm_arena_strdup(&m->arena, file);
@@ -1222,6 +1258,44 @@ static bool tm_add_source(cbm_test_model_t *m, const char *file, const char *tex
         m->suites[i].macro_registrations = true;
     }
     return sc.ok;
+}
+
+/* Scan one file and scope what it left uncertain. The uncertainty of a file
+ * that defines its own suite stays with those suites, which then run whole;
+ * a file that registers runner suites or defines no suite has nothing to
+ * scope it to, and a failure is never scoped. */
+static bool tm_add_source(cbm_test_model_t *m, const char *file, const char *text, size_t len,
+                          int language_kind) {
+    if (!m || m->finished || !file || (!text && len > 0)) {
+        if (m) {
+            m->incomplete = true;
+        }
+        return false;
+    }
+    bool before = m->incomplete;
+    int first_suite = m->suite_count;
+    int first_runner = m->runner_count;
+    m->incomplete = false;
+    bool ok = tm_scan_source(m, file, text, len, language_kind);
+    bool uncertain = m->incomplete;
+    m->incomplete = before;
+    if (!ok) {
+        m->incomplete = true;
+        return false;
+    }
+    if (uncertain) {
+        bool own_suite = m->suite_count > first_suite;
+        bool registers_runner = m->runner_count > first_runner;
+        if (!own_suite || registers_runner) {
+            m->incomplete = true;
+        } else {
+            for (int i = first_suite; i < m->suite_count; i++) {
+                m->suites[i].uncertain = true;
+            }
+            m->scoped_uncertain = true;
+        }
+    }
+    return true;
 }
 
 bool cbm_test_model_add_source(cbm_test_model_t *m, const char *file, const char *text,
@@ -1355,6 +1429,10 @@ bool cbm_test_model_finish(cbm_test_model_t *m) {
 /* ── Accessors ───────────────────────────────────────────────────── */
 
 bool cbm_test_model_complete(const cbm_test_model_t *m) {
+    return m && m->finished && !m->incomplete && !m->scoped_uncertain;
+}
+
+bool cbm_test_model_narrowable(const cbm_test_model_t *m) {
     return m && m->finished && !m->incomplete;
 }
 

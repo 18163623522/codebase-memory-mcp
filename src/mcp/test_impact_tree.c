@@ -27,14 +27,57 @@ static cbm_pinned_tree_t *tpt_owner(tpt_context *c, const cbm_pinned_tree_option
     return t;
 }
 
+/* The entries the tree materializes: everything but symlinks and submodule
+ * links, which are counted instead. Other non-regular kinds stay in, so the
+ * plan still refuses them. Entries borrow the facts' strings, which outlive
+ * the create call. */
+static bool tpt_without_links(tpt_context *c, const cbm_git_tree_inventory_t *all,
+                              cbm_git_tree_inventory_t *kept, size_t **original) {
+    *kept = (cbm_git_tree_inventory_t){0};
+    *original = NULL;
+    if (all->count == 0)
+        return true;
+    cbm_git_tree_entry_t *entries = tpt_alloc(c, all->count, sizeof(*entries));
+    size_t *positions = tpt_alloc(c, all->count, sizeof(*positions));
+    if (!entries || !positions)
+        return false;
+    size_t n = 0;
+    size_t skipped = 0;
+    for (size_t i = 0; i < all->count; i++) {
+        if (!tpt_poll(c))
+            return false;
+        const cbm_git_tree_entry_t *entry = &all->entries[i];
+        bool link = (entry->mode == 0120000 && entry->object_type == CBM_GIT_TREE_BLOB) ||
+                    (entry->mode == 0160000 && entry->object_type == CBM_GIT_TREE_COMMIT);
+        if (link) {
+            skipped++;
+        } else {
+            positions[n] = i;
+            entries[n++] = *entry;
+        }
+    }
+    kept->entries = entries;
+    kept->count = n;
+    *original = positions;
+    c->tree->view.skipped_link_count = skipped;
+    return true;
+}
+
 static bool tpt_load(tpt_context *c, const cbm_pinned_tree_options_t *o) {
     if (!tpt_identity_copy(c, o) || !tpt_poll(c))
         return false;
     cbm_git_tree_inventory_t inventory = {0};
+    cbm_git_tree_inventory_t regular = {0};
+    size_t *original = NULL;
     cbm_git_facts_error_t error = {0};
     bool ok = cbm_git_facts_inventory(o->facts, o->revision, &inventory, &error);
-    if (!tpt_after_facts(c, ok, &error) || !tpt_plan(c, o, &inventory))
+    if (!tpt_after_facts(c, ok, &error) || !tpt_without_links(c, &inventory, &regular, &original) ||
+        !tpt_plan(c, o, &regular))
         return false;
+    /* The plan numbered the kept entries; the blob batch names positions in
+     * the facts' own inventory. */
+    for (size_t i = 0; original && i < c->tree->view.file_count; i++)
+        c->tree->indices[i] = original[c->tree->indices[i]];
     cbm_git_blob_batch_t batch = {0};
     return tpt_batch(c, o, &batch) && tpt_native_prepare(c) && tpt_build(c, &batch) &&
            tpt_audit(c) && tpt_manifest(c) && tpt_poll(c);

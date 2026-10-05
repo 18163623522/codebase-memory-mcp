@@ -54,8 +54,8 @@ static bool changes_path_valid(const unsigned char *path, size_t length) {
     return true;
 }
 
-static bool changes_record(const unsigned char *bytes, size_t length, size_t *offset,
-                             char *status, changes_slice_t *path) {
+static bool changes_record(const unsigned char *bytes, size_t length, size_t *offset, char *status,
+                           changes_slice_t *path) {
     size_t at = *offset;
     if (length - at < 4 || bytes[at + 1] != 0 ||
         (bytes[at] != 'A' && bytes[at] != 'M' && bytes[at] != 'D' && bytes[at] != 'T')) {
@@ -76,8 +76,8 @@ static bool changes_record(const unsigned char *bytes, size_t length, size_t *of
     return true;
 }
 
-static int changes_path_compare(const unsigned char *a, size_t a_length,
-                                  const unsigned char *b, size_t b_length) {
+static int changes_path_compare(const unsigned char *a, size_t a_length, const unsigned char *b,
+                                size_t b_length) {
     size_t common = a_length < b_length ? a_length : b_length;
     int order = memcmp(a, b, common); /* specified unsigned-byte comparison */
     return order ? order : (a_length > b_length) - (a_length < b_length);
@@ -94,9 +94,9 @@ static void changes_sort(cbm_change_file_t *files, cbm_change_file_t *scratch, s
             size_t a = left;
             size_t b = middle;
             for (size_t i = left; i < right; i++) {
-                if (b == right || (a < middle &&
-                    changes_path_compare(source[a].path, source[a].path_length,
-                                         source[b].path, source[b].path_length) <= 0)) {
+                if (b == right || (a < middle && changes_path_compare(
+                                                     source[a].path, source[a].path_length,
+                                                     source[b].path, source[b].path_length) <= 0)) {
                     target[i] = source[a++];
                 } else {
                     target[i] = source[b++];
@@ -117,8 +117,7 @@ static void changes_sort(cbm_change_file_t *files, cbm_change_file_t *scratch, s
     }
 }
 
-static size_t changes_find(const cbm_changes_t *changes, const unsigned char *path,
-                            size_t length) {
+static size_t changes_find(const cbm_changes_t *changes, const unsigned char *path, size_t length) {
     size_t low = 0;
     size_t high = changes->count;
     while (low < high) {
@@ -143,7 +142,7 @@ static bool changes_starts(changes_slice_t line, const char *prefix) {
 }
 
 static bool changes_line(const unsigned char *bytes, size_t length, size_t *offset,
-                          changes_slice_t *line) {
+                         changes_slice_t *line) {
     if (*offset == length) {
         return false;
     }
@@ -241,8 +240,7 @@ static bool changes_old_range_usable(changes_slice_t line) {
         }
         break;
     }
-    return offset < line.length && line.bytes[offset] == ' ' &&
-           (values[1] == 0 || values[0] > 0);
+    return offset < line.length && line.bytes[offset] == ' ' && (values[1] == 0 || values[0] > 0);
 }
 
 /* The legacy file result does not retain old/new mode metadata or the old
@@ -286,13 +284,15 @@ static void changes_audit_headers(cbm_changes_t *changes) {
         cbm_change_file_t *file = &changes->files[current];
         if (changes_starts(line, "old mode ") || changes_starts(line, "new mode ")) {
             file->reasons |= CBM_CHANGE_MODE;
-            if (!changes_mode(line, changes_starts(line, "old mode ") ? "old mode " : "new mode ")) {
+            if (!changes_mode(line,
+                              changes_starts(line, "old mode ") ? "old mode " : "new mode ")) {
                 changes->issues |= CBM_CHANGES_PATCH_INCOMPLETE;
             }
         } else if (changes_starts(line, "new file mode ") ||
                    changes_starts(line, "deleted file mode ")) {
-            if (!changes_mode(line, changes_starts(line, "new file mode ") ?
-                                      "new file mode " : "deleted file mode ")) {
+            if (!changes_mode(line, changes_starts(line, "new file mode ")
+                                        ? "new file mode "
+                                        : "deleted file mode ")) {
                 changes->issues |= CBM_CHANGES_PATCH_INCOMPLETE;
             }
         } else if (changes_starts(line, "--- ")) {
@@ -335,8 +335,9 @@ static void changes_reconcile(cbm_changes_t *changes, changes_match_t *matches) 
     for (int i = 0; i < patch_count; i++) {
         const cbm_diff_file_t *file = &files[i];
         size_t length = strlen(file->path);
-        size_t index = changes_path_valid((const unsigned char *)file->path, length) ?
-            changes_find(changes, (const unsigned char *)file->path, length) : SIZE_MAX;
+        size_t index = changes_path_valid((const unsigned char *)file->path, length)
+                           ? changes_find(changes, (const unsigned char *)file->path, length)
+                           : SIZE_MAX;
         if (index == SIZE_MAX) {
             changes->issues |= CBM_CHANGES_PATCH_EXTRA_PATH;
             continue;
@@ -386,13 +387,15 @@ static void changes_reconcile(cbm_changes_t *changes, changes_match_t *matches) 
             file->patch_file = matches[i].file;
         }
     }
-    changes->state = changes->count ? CBM_CHANGES_NONEMPTY :
-        (changes->patch_length == 0 && changes->reconciled ? CBM_CHANGES_EMPTY : CBM_CHANGES_UNKNOWN);
+    changes->state =
+        changes->count ? CBM_CHANGES_NONEMPTY
+                       : (changes->patch_length == 0 && changes->reconciled ? CBM_CHANGES_EMPTY
+                                                                            : CBM_CHANGES_UNKNOWN);
 }
 
-cbm_changes_status_t cbm_changes_parse(const unsigned char *name_status,
-                                       size_t name_status_length, const unsigned char *patch,
-                                       size_t patch_length, cbm_changes_t **out) {
+cbm_changes_status_t cbm_changes_parse(const unsigned char *name_status, size_t name_status_length,
+                                       const unsigned char *patch, size_t patch_length,
+                                       cbm_changes_t **out) {
     if (out) {
         *out = NULL;
     }
@@ -410,7 +413,8 @@ cbm_changes_status_t cbm_changes_parse(const unsigned char *name_status,
         }
         count++;
     }
-    if (count > SIZE_MAX / sizeof(cbm_change_file_t) || count > SIZE_MAX / sizeof(changes_match_t)) {
+    if (count > SIZE_MAX / sizeof(cbm_change_file_t) ||
+        count > SIZE_MAX / sizeof(changes_match_t)) {
         return CBM_CHANGES_OOM;
     }
     CBMArena arena;
@@ -449,7 +453,8 @@ cbm_changes_status_t cbm_changes_parse(const unsigned char *name_status,
         for (size_t i = 0; i < count; i++) {
             changes_slice_t path;
             char status;
-            if (!changes_record(changes->name_status, name_status_length, &offset, &status, &path)) {
+            if (!changes_record(changes->name_status, name_status_length, &offset, &status,
+                                &path)) {
                 cbm_changes_free(changes);
                 return CBM_CHANGES_INVALID;
             }
@@ -470,7 +475,7 @@ cbm_changes_status_t cbm_changes_parse(const unsigned char *name_status,
      * C-string path consumer; retain the exact bytes and conservative inventory. */
     bool binary_text = patch_length && memchr(changes->patch, 0, patch_length);
     changes->diff = cbm_diff_parse(binary_text ? "" : (const char *)changes->patch,
-                                  binary_text ? 0 : patch_length);
+                                   binary_text ? 0 : patch_length);
     if (!changes->diff) {
         goto oom;
     }

@@ -2380,16 +2380,18 @@ static CBMFileResult *extract_file_ex_body(const char *source, int source_len, C
             cbm_run_go_lsp(a, result, source, source_len, root);
         }
         if (language == CBM_LANG_C || language == CBM_LANG_CPP || language == CBM_LANG_CUDA) {
-            if (!cbm_run_c_lsp_with_test_owners(
-                    a, result, source, source_len, root, language != CBM_LANG_C,
-                    CBM_SOURCE_ORIGIN_RAW, result)) {
+            if (!cbm_run_c_lsp_with_test_owners(a, result, source, source_len, root,
+                                                language != CBM_LANG_C, CBM_SOURCE_ORIGIN_RAW,
+                                                result)) {
                 result->has_error = true;
                 if (result->test_declarations_status == CBM_TEST_EXTRACT_OK) {
                     result->test_declarations_status = CBM_TEST_EXTRACT_UNSUPPORTED_FORM;
                     result->test_declaration_index = -1;
                     result->test_declaration_line = 0;
-                    result->error_msg = cbm_arena_strdup(a, "configured owner source identity mismatch");
-                    if (!result->error_msg) result->test_declarations_status = CBM_TEST_EXTRACT_OOM;
+                    result->error_msg =
+                        cbm_arena_strdup(a, "configured owner source identity mismatch");
+                    if (!result->error_msg)
+                        result->test_declarations_status = CBM_TEST_EXTRACT_OOM;
                 }
             }
         }
@@ -3068,16 +3070,15 @@ CBMFileResult *cbm_extract_file_ex(const char *source, int source_len, CBMLangua
                                    const char **include_paths, const CBMMacroTable *macro_table,
                                    const CBMReturnTypeTable *return_type_table) {
     return cbm_extract_file_ex_with_tests(source, source_len, language, project, rel_path,
-                                          timeout_micros, extra_defines, include_paths,
-                                          macro_table, return_type_table, NULL);
+                                          timeout_micros, extra_defines, include_paths, macro_table,
+                                          return_type_table, NULL);
 }
 
 CBMFileResult *cbm_extract_file_ex_with_tests(
     const char *source, int source_len, CBMLanguage language, const char *project,
     const char *rel_path, int64_t timeout_micros, const char **extra_defines,
     const char **include_paths, const CBMMacroTable *macro_table,
-    const CBMReturnTypeTable *return_type_table,
-    const cbm_test_declarations_t *test_declarations) {
+    const CBMReturnTypeTable *return_type_table, const cbm_test_declarations_t *test_declarations) {
     CBMArena scratch;
     if (tl_scratch_live && tl_scratch_slot) {
         scratch = *tl_scratch_slot;
@@ -3086,10 +3087,9 @@ CBMFileResult *cbm_extract_file_ex_with_tests(
     } else {
         cbm_arena_init_lazy(&scratch, CBM_EXTRACT_SCRATCH_BLOCK);
     }
-    CBMFileResult *result = extract_file_ex_body(source, source_len, language, project, rel_path,
-                                                 timeout_micros, extra_defines, include_paths,
-                                                 macro_table, return_type_table, &scratch,
-                                                 test_declarations);
+    CBMFileResult *result = extract_file_ex_body(
+        source, source_len, language, project, rel_path, timeout_micros, extra_defines,
+        include_paths, macro_table, return_type_table, &scratch, test_declarations);
     /* !tl_scratch_live: a nested extraction (an embedded language inside this
      * file) may already have parked its own; never overwrite it. */
     /* Kept up to CBM_EXTRACT_SCRATCH_KEEP_BYTES, grown blocks included: the
@@ -3110,6 +3110,7 @@ CBMFileResult *cbm_extract_file_ex_with_tests(
     } else {
         cbm_arena_destroy(&scratch);
     }
+    cbm_test_declarations_degrade(result);
     return result;
 }
 

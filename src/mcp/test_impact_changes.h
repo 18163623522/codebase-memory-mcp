@@ -10,11 +10,7 @@
  * This is not a graph/coverage identity or provenance certificate. */
 typedef struct cbm_changes cbm_changes_t;
 
-typedef enum {
-    CBM_CHANGES_OK = 0,
-    CBM_CHANGES_INVALID,
-    CBM_CHANGES_OOM
-} cbm_changes_status_t;
+typedef enum { CBM_CHANGES_OK = 0, CBM_CHANGES_INVALID, CBM_CHANGES_OOM } cbm_changes_status_t;
 
 typedef enum {
     CBM_CHANGES_UNKNOWN = 0,
@@ -55,9 +51,9 @@ typedef struct {
  * OOM/no owner. Legacy reader may mask header OOM as incomplete: such a result
  * retains paths but no hunk pointers and requires outer broad/full fallback.
  * NULL input is allowed only at zero length. No I/O, path expansion or recoding. */
-cbm_changes_status_t cbm_changes_parse(const unsigned char *name_status,
-                                       size_t name_status_length, const unsigned char *patch,
-                                       size_t patch_length, cbm_changes_t **out);
+cbm_changes_status_t cbm_changes_parse(const unsigned char *name_status, size_t name_status_length,
+                                       const unsigned char *patch, size_t patch_length,
+                                       cbm_changes_t **out);
 void cbm_changes_free(cbm_changes_t *changes);
 
 /* Complete authoritative inventory, sorted by unsigned path bytes. Never

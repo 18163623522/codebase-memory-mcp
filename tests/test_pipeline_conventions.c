@@ -320,24 +320,38 @@ TEST(pipeline_conventions_absent_and_default_omit_role_properties) {
     ASSERT_TRUE(setup); ASSERT_TRUE(absent); ASSERT_TRUE(configured); ASSERT_TRUE(cleanup);
     ASSERT_EQ(rc, 0); ASSERT_TRUE(defaults); PASS();
 }
-static int pc_typed_failure(bool legacy) {
+static bool pc_coverage_kind(const char *db, const char *path, const char *kind) {
+    cbm_store_t *s = cbm_store_open_path_query(db);
+    cbm_coverage_row_t *rows = NULL; int count = 0; bool found = false;
+    if (s && cbm_store_coverage_get_path(s, PC_PROJECT, path, &rows, &count) == CBM_STORE_OK)
+        for (int i = 0; i < count; i++) found = found || pc_text(rows[i].kind, kind);
+    cbm_store_free_coverage(rows, count); cbm_store_close(s); return found;
+}
+/* A configured form that cannot be mapped degrades its FILE, not the index
+ * (user decision 2026-10-04): the run publishes, the file is indexed without
+ * configured test roles, and it carries a test_declarations diagnostic. Before,
+ * one such file aborted the whole index (cbm's own repro matrices did). */
+static int pc_typed_degrade(bool legacy) {
     pc_env_t env; pc_fixture_t f = {0}; pc_snapshot_t snapshot;
     bool setup = pc_env_begin(&env, legacy) && pc_fixture_open(&f, legacy);
     bool control = setup && pc_seed(&f, pc_config0) && pc_snapshot(&f, &snapshot);
     bool changed = control && pc_source_write(&f, "unit.c", pc_bad_source);
     cbm_incremental_route_t route = CBM_INCREMENTAL_ROUTE_NONE;
     int rc = changed ? pc_run(&f, legacy ? CBM_MODE_FULL : CBM_MODE_FAST, legacy, 0, NULL, NULL, &route) : -999;
-    bool preserved = changed && pc_preserved(&f, &snapshot);
+    char now[128];
+    bool published = changed && pc_generation(f.db, now) && strcmp(now, snapshot.generation) != 0 &&
+        pc_ordinary_graph(f.db, "preserved") && pc_no_roles(f.db) &&
+        pc_coverage_kind(f.db, "unit.c", "test_declarations");
     bool cleanup = pc_close(&f, &env);
     ASSERT_TRUE(setup); ASSERT_TRUE(control); ASSERT_TRUE(changed); ASSERT_TRUE(cleanup);
     ASSERT_EQ(route, legacy ? CBM_INCREMENTAL_ROUTE_LEGACY_PARTIAL : CBM_INCREMENTAL_ROUTE_FORCED_FULL);
-    ASSERT_EQ(rc, CBM_PIPELINE_ABORT_PRESERVE_DB); ASSERT_TRUE(preserved); PASS();
+    ASSERT_EQ(rc, 0); ASSERT_TRUE(published); PASS();
 }
-TEST(pipeline_conventions_typed_failure_full_preserves_generation) {
-    ASSERT_EQ(pc_init_status, 0); return pc_typed_failure(false);
+TEST(pipeline_conventions_typed_failure_full_degrades_the_file) {
+    ASSERT_EQ(pc_init_status, 0); return pc_typed_degrade(false);
 }
-TEST(pipeline_conventions_typed_failure_incremental_preserves_generation) {
-    ASSERT_EQ(pc_init_status, 0); return pc_typed_failure(true);
+TEST(pipeline_conventions_typed_failure_incremental_degrades_the_file) {
+    ASSERT_EQ(pc_init_status, 0); return pc_typed_degrade(true);
 }
 
 typedef struct { pc_fixture_t *fixture; int called; bool staged, written; } pc_hook_t;
@@ -610,8 +624,8 @@ SUITE(pipeline_conventions) {
     RUN_TEST(pipeline_conventions_parallel_roles_qns_and_calls);
     RUN_TEST(pipeline_conventions_config_only_change_rebuilds_same_source);
     RUN_TEST(pipeline_conventions_absent_and_default_omit_role_properties);
-    RUN_TEST(pipeline_conventions_typed_failure_full_preserves_generation);
-    RUN_TEST(pipeline_conventions_typed_failure_incremental_preserves_generation);
+    RUN_TEST(pipeline_conventions_typed_failure_full_degrades_the_file);
+    RUN_TEST(pipeline_conventions_typed_failure_incremental_degrades_the_file);
     RUN_TEST(pipeline_conventions_publication_config_mutation_preserves_generation);
     RUN_TEST(pipeline_conventions_published_owners_survive_join_and_config_edit);
     RUN_TEST(pipeline_conventions_disabled_required_parallel_crosswalk_preserves_generation);

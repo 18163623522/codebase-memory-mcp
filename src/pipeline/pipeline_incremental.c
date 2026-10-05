@@ -16,6 +16,7 @@ enum { INCR_RING_BUF = 4, INCR_RING_MASK = 3, INCR_TS_BUF = 24 };
 #include <stdio.h>
 #include <time.h>
 #include "pipeline/lsp_surface.h"
+#include "foundation/mem_core.h"
 #include "pipeline/pass_lsp_cross.h"
 #include "sqlite3.h"
 #include "yyjson/yyjson.h"
@@ -778,8 +779,13 @@ static int frozen_fresh_manifest(cbm_pipeline_t *p, cbm_file_hash_t **out, int *
     int ignored_total = 0;
     const cbm_userconfig_t *previous = cbm_get_user_lang_config();
     cbm_set_user_lang_config(cbm_pipeline_frozen_config(p));
-    int rc = cbm_discover_ex2(cbm_pipeline_repo_path(p), &opts, &files, &count, &excluded,
-                              &excluded_count, &ignored, &ignored_count, &ignored_total);
+    /* With a classified file list the reconciliation re-hashes exactly the
+     * listed files: a file added to the source root since is not compared,
+     * because it is not indexed either. */
+    int rc = cbm_pipeline_frozen_has_file_list(p)
+                 ? cbm_pipeline_frozen_listed_files(p, &files, &count)
+                 : cbm_discover_ex2(cbm_pipeline_repo_path(p), &opts, &files, &count, &excluded,
+                                    &excluded_count, &ignored, &ignored_count, &ignored_total);
     if (rc == 0)
         rc = cbm_pipeline_build_frozen_manifest(p, files, count, excluded, excluded_count, out,
                                                 out_count);
@@ -1476,9 +1482,8 @@ static int run_extract_resolve(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *changed
         bool legacy_cross_arena_live = false;
         bool owner_walk_required = atomic_load(&ctx->test_definition_owners_seen) != 0;
         char cross_disabled[CBM_SZ_16];
-        if (owner_walk_required &&
-            cbm_safe_getenv("CBM_DISABLE_LSP_CROSS", cross_disabled,
-                            sizeof(cross_disabled), NULL) != NULL) {
+        if (owner_walk_required && cbm_safe_getenv("CBM_DISABLE_LSP_CROSS", cross_disabled,
+                                                   sizeof(cross_disabled), NULL) != NULL) {
             atomic_store(&ctx->test_declarations_failed, 1);
             rc = CBM_PIPELINE_ABORT_PRESERVE_DB;
             goto cross_resolve_cleanup;
@@ -1486,9 +1491,11 @@ static int run_extract_resolve(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *changed
         if (closure) {
             /* Fresh surfaces for the re-parsed files, from the same collect
              * path a full build uses; then registries over stored + fresh. */
-            def_modules = cbm_pipeline_test_force_def_modules_null(ctx) ? NULL :
-                (char **)calloc((size_t)ci, sizeof(char *));
-            int *def_starts = (int *)calloc((size_t)ci + 1, sizeof(int));
+            def_modules = cbm_pipeline_test_force_def_modules_null(ctx)
+                              ? NULL
+                              : (char **)calloc((size_t)ci, sizeof(char *));
+            int *def_starts =
+                (int *)cbm_calloc(CBM_MEM_CLASS_EXTRACT, ((size_t)ci + 1) * sizeof(int));
             int fresh_count = 0;
             CBMLSPDef *fresh_defs =
                 def_modules && def_starts
@@ -1499,7 +1506,7 @@ static int run_extract_resolve(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *changed
             if (fresh_count < 0 || (owner_walk_required && (!fresh_defs || fresh_count <= 0))) {
                 /* Do not substitute the previous generation's definitions for
                  * configured owners that failed fresh preparation. */
-                free(def_starts);
+                cbm_free(CBM_MEM_CLASS_EXTRACT, def_starts);
                 free(fresh_defs);
                 closure->def_modules = def_modules;
                 closure->def_module_count = def_modules ? ci : 0;
@@ -1515,7 +1522,7 @@ static int run_extract_resolve(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *changed
                 closure->fresh_rows = NULL;
                 closure->fresh_count = 0;
             }
-            free(def_starts);
+            cbm_free(CBM_MEM_CLASS_EXTRACT, def_starts);
             all_def_count = closure->base_def_count + fresh_count;
             if (all_def_count > 0) {
                 all_defs = (CBMLSPDef *)cbm_arena_alloc(&closure->arena,
@@ -1571,13 +1578,12 @@ static int run_extract_resolve(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *changed
              * Only configured owners require this additional cross walk. */
             cbm_arena_init(&legacy_cross_arena);
             legacy_cross_arena_live = true;
-            def_modules = cbm_arena_alloc(&legacy_cross_arena,
-                                            (size_t)ci * sizeof(*def_modules));
+            def_modules = cbm_arena_alloc(&legacy_cross_arena, (size_t)ci * sizeof(*def_modules));
             if (def_modules) {
                 memset(def_modules, 0, (size_t)ci * sizeof(*def_modules));
-                all_defs = cbm_pxc_collect_all_defs(
-                    ctx, &legacy_cross_arena, cache, changed_files, ci,
-                    ctx->project_name, def_modules, &all_def_count, NULL);
+                all_defs =
+                    cbm_pxc_collect_all_defs(ctx, &legacy_cross_arena, cache, changed_files, ci,
+                                             ctx->project_name, def_modules, &all_def_count, NULL);
             }
             if (!all_defs || all_def_count <= 0) {
                 atomic_store(&ctx->test_declarations_failed, 1);
@@ -1587,12 +1593,11 @@ static int run_extract_resolve(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *changed
             module_def_index = cbm_pxc_build_module_def_index(all_defs, all_def_count);
         }
         cbm_clock_gettime(CLOCK_MONOTONIC, &t);
-        rc = cbm_parallel_resolve(ctx, changed_files, ci, cache, &shared_ids, worker_count,
-                                  all_defs, all_def_count,
-                                  closure ? closure->def_modules : def_modules,
-                                  module_def_index, registries_arg);
+        rc = cbm_parallel_resolve(
+            ctx, changed_files, ci, cache, &shared_ids, worker_count, all_defs, all_def_count,
+            closure ? closure->def_modules : def_modules, module_def_index, registries_arg);
 
-cross_resolve_cleanup:
+    cross_resolve_cleanup:
         if (module_def_index) {
             cbm_pxc_free_module_def_index(module_def_index);
         }
@@ -1867,8 +1872,10 @@ static int closure_probe_surfaces(cbm_pipeline_t *p, const char *project,
                                   cbm_default_worker_count(true));
     }
     if (rc == 0) {
-        char **def_modules = (char **)calloc((size_t)probe_count, sizeof(char *));
-        int *def_starts = (int *)calloc((size_t)probe_count + 1, sizeof(int));
+        char **def_modules =
+            (char **)cbm_calloc(CBM_MEM_CLASS_EXTRACT, (size_t)probe_count * sizeof(char *));
+        int *def_starts =
+            (int *)cbm_calloc(CBM_MEM_CLASS_EXTRACT, ((size_t)probe_count + 1) * sizeof(int));
         int def_count = 0;
         CBMLSPDef *defs = NULL;
         CBMArena probe_arena;
@@ -1885,12 +1892,12 @@ static int closure_probe_surfaces(cbm_pipeline_t *p, const char *project,
         }
         free(defs);
         cbm_arena_destroy(&probe_arena);
-        free(def_starts);
+        cbm_free(CBM_MEM_CLASS_EXTRACT, def_starts);
         if (def_modules) {
             for (int i = 0; i < probe_count; i++) {
                 free(def_modules[i]);
             }
-            free(def_modules);
+            cbm_free(CBM_MEM_CLASS_EXTRACT, def_modules);
         }
     }
     if (cache) {
@@ -2086,10 +2093,9 @@ static int closure_try_plan(cbm_pipeline_t *p, cbm_store_t *store, const char *p
         }
         probe_files[i] = *info;
     }
-    int probe_rc = n_changed > 0
-                       ? closure_probe_surfaces(p, project, probe_files, n_changed,
-                                                 &probe_rows, &probe_count)
-                       : 0;
+    int probe_rc = n_changed > 0 ? closure_probe_surfaces(p, project, probe_files, n_changed,
+                                                          &probe_rows, &probe_count)
+                                 : 0;
     if (probe_rc != 0) {
         cbm_ht_free(rows_by_path);
         if (probe_rc == CBM_PIPELINE_ABORT_PRESERVE_DB) {

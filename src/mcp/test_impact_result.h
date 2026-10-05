@@ -44,6 +44,9 @@ typedef enum {
     CBM_TEST_RESULT_FALLBACK_RULE_RUN_ALL,
     CBM_TEST_RESULT_FALLBACK_POLICY_EVALUATION_FAILED,
     CBM_TEST_RESULT_FALLBACK_TRAVERSAL_POLICY_UNKNOWN,
+    /* The walk reached the test runner's entry point: every suite may run
+     * changed code at start-up (smart-ci-design review M-3). */
+    CBM_TEST_RESULT_FALLBACK_RUNNER_REACHED,
     CBM_TEST_RESULT_FALLBACK_COUNT
 } cbm_test_result_fallback_t;
 

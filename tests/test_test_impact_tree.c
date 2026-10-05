@@ -1135,15 +1135,23 @@ TEST(tree_c_complete_inventory_and_native_names) {
     PT_CHECK(cbm_pinned_tree_create(&options, &fx.tree, &error) == CBM_PINNED_TREE_OK);
     PT_CHECK(pt_close_one(&fx.tree));
     pt_row rows[2] = {fx.rows[0], fx.rows[0]};
-    rows[0].path = "good";
-    rows[1].path = "unsupported";
+    /* A symlink or a submodule link is left out and counted, as discovery
+     * never indexes a symlink; the regular file beside it is pinned. The link
+     * sorts first (rows are in git's order), so the pinned file is not at its
+     * position in git's own list. */
+    rows[0].path = "a-link";
+    rows[1].path = "good";
     const uint32_t modes[] = {0120000, 0160000};
     for (size_t i = 0; i < 2; i++) {
-        rows[1].mode = modes[i];
-        strcpy(rows[1].oid, i == 0 ? fx.rows[0].oid : fx.a);
+        rows[0].mode = modes[i];
+        strcpy(rows[0].oid, i == 0 ? fx.rows[0].oid : fx.a);
         PT_CHECK(pt_replace_tree(&fx, rows, 2));
         options = pt_options(&fx, CBM_GIT_REV_HEAD);
-        PT_CHECK(pt_clean_failure(&fx, &options, CBM_PINNED_TREE_UNSUPPORTED));
+        PT_CHECK(cbm_pinned_tree_create(&options, &fx.tree, &error) == CBM_PINNED_TREE_OK);
+        const cbm_pinned_tree_view_t *linked = cbm_pinned_tree_view(fx.tree);
+        PT_CHECK(linked && linked->file_count == 1 && linked->skipped_link_count == 1 &&
+                 strcmp((const char *)linked->files[0].path, "good") == 0);
+        PT_CHECK(pt_close_one(&fx.tree));
     }
     rows[1] = fx.rows[0];
 #ifdef _WIN32
@@ -2532,7 +2540,6 @@ SUITE(test_impact_tree) {
     RUN_TEST(tree_g_verify_state_and_complete_inventory);
     RUN_TEST(tree_h_cleanup_owner_and_unrelated_resources);
 }
-
 
 /* Independent prefix-read acceptance: no publisher/admission claims. All
  * mutations are synchronous and restricted to the fixture's owned namespace. */

@@ -89,10 +89,7 @@ typedef struct {
     size_t length;
 } cbm_git_bytes_t;
 
-typedef enum {
-    CBM_GIT_TREE_BLOB = 1,
-    CBM_GIT_TREE_COMMIT = 2
-} cbm_git_tree_object_type_t;
+typedef enum { CBM_GIT_TREE_BLOB = 1, CBM_GIT_TREE_COMMIT = 2 } cbm_git_tree_object_type_t;
 
 typedef struct {
     const char *path; /* owned NUL-terminated bytes; path_length is authoritative */
@@ -117,7 +114,7 @@ typedef struct {
  * Empty success is {NULL,0}; every failure clears out. All data lives until
  * facts_free. Existing guards, cancellation/deadline and query budgets apply. */
 bool cbm_git_facts_inventory(cbm_git_facts_t *facts, cbm_git_revision_t revision,
-                              cbm_git_tree_inventory_t *out, cbm_git_facts_error_t *error);
+                             cbm_git_tree_inventory_t *out, cbm_git_facts_error_t *error);
 
 typedef struct {
     cbm_git_bytes_t bytes;
@@ -173,28 +170,29 @@ typedef enum {
     CBM_GIT_ANCESTOR_CHANGES_OK = 1
 } cbm_git_ancestor_changes_status_t;
 
-cbm_git_ancestor_changes_status_t cbm_git_facts_ancestor_changes(
-    cbm_git_facts_t *facts,
-    const char *artifact_oid, size_t artifact_oid_length,
-    cbm_git_bytes_t *name_status,
-    cbm_git_facts_error_t *error);
+cbm_git_ancestor_changes_status_t cbm_git_facts_ancestor_changes(cbm_git_facts_t *facts,
+                                                                 const char *artifact_oid,
+                                                                 size_t artifact_oid_length,
+                                                                 cbm_git_bytes_t *name_status,
+                                                                 cbm_git_facts_error_t *error);
 
 typedef struct {
     cbm_git_revision_t revision; /* HEAD or actual MERGE_BASE; BASE is INVALID */
-    const size_t *indices; /* indices into that revision's canonical pinned inventory */
+    const size_t *indices;       /* indices into that revision's canonical pinned inventory */
     size_t count; /* duplicates allowed; NULL indices allowed exactly when count==0 */
 } cbm_git_blob_batch_request_t;
 
 typedef struct {
-    size_t max_entries; /* positive; bounds request.count, including duplicates */
+    size_t max_entries;     /* positive; bounds request.count, including duplicates */
     size_t max_input_bytes; /* positive; cumulative OID+LF stdin bytes for this call */
-    size_t max_arena_bytes; /* positive; all Git-facts-owned logical arena requests during this call */
+    size_t
+        max_arena_bytes; /* positive; all Git-facts-owned logical arena requests during this call */
 } cbm_git_blob_batch_limits_t;
 
 typedef struct {
     size_t inventory_index;
     const cbm_git_tree_entry_t *entry; /* facts-owned canonical path/mode/type/OID */
-    cbm_git_bytes_t bytes; /* exact blob contents; NOT promised NUL-terminated */
+    cbm_git_bytes_t bytes;             /* exact blob contents; NOT promised NUL-terminated */
 } cbm_git_blob_batch_item_t;
 
 typedef struct {
@@ -243,11 +241,9 @@ typedef struct {
  * the whole capture directory, including stdin, under existing diagnostics.
  * No legacy read_blob/inventory/diff/ancestor-change semantics are changed. */
 bool cbm_git_facts_read_blob_batch(cbm_git_facts_t *facts,
-                                  const cbm_git_blob_batch_request_t *request,
-                                  const cbm_git_blob_batch_limits_t *limits,
-                                  cbm_git_blob_batch_t *out,
-                                  cbm_git_facts_error_t *error);
-
+                                   const cbm_git_blob_batch_request_t *request,
+                                   const cbm_git_blob_batch_limits_t *limits,
+                                   cbm_git_blob_batch_t *out, cbm_git_facts_error_t *error);
 
 #ifdef CBM_ENABLE_TEST_SEAMS
 /* Deterministic wrappers around the actual production header/frame parsers.
@@ -259,16 +255,14 @@ bool cbm_git_facts_read_blob_batch(cbm_git_facts_t *facts,
  * be NULL (unknown); otherwise each parsed size must match expected_sizes[i].
  * Payload mode requires expected_sizes for nonzero count. Empty capture/count
  * is valid. Bad pointer/width arguments are INVALID. No partial output views. */
-bool cbm_git_facts_test_batch_header(cbm_git_bytes_t capture,
-                                    const char *expected_oid, size_t oid_hex_length,
-                                    size_t *object_size, size_t *header_length,
-                                    cbm_git_facts_error_t *error);
+bool cbm_git_facts_test_batch_header(cbm_git_bytes_t capture, const char *expected_oid,
+                                     size_t oid_hex_length, size_t *object_size,
+                                     size_t *header_length, cbm_git_facts_error_t *error);
 bool cbm_git_facts_test_batch_capture(cbm_git_bytes_t capture, size_t oid_hex_length,
-                                     const char *const *expected_oids,
-                                     const size_t *expected_sizes, size_t count,
-                                     bool has_payload, cbm_git_facts_error_t *error);
+                                      const char *const *expected_oids,
+                                      const size_t *expected_sizes, size_t count, bool has_payload,
+                                      cbm_git_facts_error_t *error);
 #endif
-
 
 /* Local Git identity/content does not authenticate a coverage artifact or
  * establish that any index/graph generation covers this snapshot. */

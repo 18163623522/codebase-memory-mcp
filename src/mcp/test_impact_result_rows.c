@@ -68,8 +68,10 @@ static bool tir_normalize_suites(tir_context *c) {
     if (!tir_sort(c, c->suites, c->suite_count, sizeof(*c->suites), tir_suite_compare))
         return false;
     size_t used = 0;
-    bool known =
-        c->input->inventory_complete && c->input->model && cbm_test_model_complete(c->input->model);
+    /* Narrowable, not complete: a suite the model is unsure of arrives whole
+     * in the selection, so only uncertainty it cannot scope is global. */
+    bool known = c->input->inventory_complete && c->input->model &&
+                 cbm_test_model_narrowable(c->input->model);
     for (size_t i = 0; i < c->suite_count; i++) {
         if (!tir_step(c, 0, 1))
             return false;
@@ -264,7 +266,7 @@ static void tir_global_floors(tir_context *c) {
         c->global |= TIR_FALLBACK(CBM_TEST_RESULT_FALLBACK_ACTIVATION_UNKNOWN);
     if (in->comparison != CBM_TEST_RESULT_COMPARISON_CHANGED)
         return;
-    if (!in->inventory_complete || !in->model || !cbm_test_model_complete(in->model))
+    if (!in->inventory_complete || !in->model || !cbm_test_model_narrowable(in->model))
         c->global |= CBM_TEST_SELECT_INVENTORY_UNKNOWN;
     if (!in->selection)
         c->global |= TIR_FALLBACK(CBM_TEST_RESULT_FALLBACK_SELECTION_UNAVAILABLE);

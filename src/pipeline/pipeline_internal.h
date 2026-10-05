@@ -39,6 +39,15 @@ typedef enum {
     CBM_PIPELINE_FROZEN_PIPELINE_ERROR
 } cbm_pipeline_frozen_status_t;
 
+/* One file of a classified pinned ledger: a path relative to source_root
+ * ('/'-separated; no empty, "." or ".." segment) and the language the ledger
+ * gave it. CBM_LANG_COUNT: the file has no supported language and is not
+ * indexed, as discovery does not index it. */
+typedef struct {
+    const char *rel_path;
+    CBMLanguage language;
+} cbm_pipeline_frozen_file_t;
+
 typedef struct {
     /* Explicit native absolute paths. Source root and destination parent are
      * private, caller-owned directories for the entire owner lifetime.
@@ -72,6 +81,15 @@ typedef struct {
      * consumers may see only the internal latch until the next such sample.
      */
     atomic_int *cancelled;
+
+    /* Optional: the files to index, from a classified pinned ledger (see
+     * test_impact_classify.h). With a list the build walks no directory: it
+     * indexes exactly these files under these languages, and the pre-commit
+     * reconciliation re-hashes exactly them, so a file added to source_root
+     * after the ledger was made is never indexed and a listed file that is not
+     * there is INPUT_CHANGED. NULL with 0 discovers source_root. Copied. */
+    const cbm_pipeline_frozen_file_t *files;
+    size_t file_count;
 } cbm_pipeline_frozen_inputs_t;
 
 /* Clear *out first. Deep-copy/validate all input; no Git/config filesystem
@@ -92,6 +110,14 @@ cbm_pipeline_frozen_status_t cbm_pipeline_frozen_create(const cbm_pipeline_froze
  */
 cbm_pipeline_frozen_status_t cbm_pipeline_frozen_build(cbm_pipeline_frozen_t *owner);
 
+/* Inside a frozen build: whether the owner was given a file list, and that
+ * list as discovery records (absolute path under the source root, the listed
+ * language, the size on disk), sorted by relative path, files without a
+ * language left out. A listed file that is not a regular file records
+ * INPUT_CHANGED and returns CBM_NOT_FOUND. Free with cbm_discover_free. */
+bool cbm_pipeline_frozen_has_file_list(const cbm_pipeline_t *p);
+int cbm_pipeline_frozen_listed_files(cbm_pipeline_t *p, cbm_file_info_t **out, int *count);
+
 /* Thread-safe while owner is alive; sets the internal atomic immediately.
  * No concurrent free. This does not await a sample of the external flag. */
 void cbm_pipeline_frozen_cancel(cbm_pipeline_frozen_t *owner);
@@ -103,19 +129,25 @@ void cbm_pipeline_frozen_cancel(cbm_pipeline_frozen_t *owner);
  */
 const cbm_pipeline_t *cbm_pipeline_frozen_diagnostics(const cbm_pipeline_frozen_t *owner);
 
-/* Monotone negative observations; zero is NOT a completeness certificate. */
+/* Monotone negative observations; zero is NOT a completeness certificate.
+ * PARSE_GAP alone does not refuse the candidate: a file that parsed only
+ * partially stays in the graph with its unparsed ranges recorded, and the
+ * selection treats a change to it as a parse gap (the file is seeded whole and
+ * its language's lane runs whole). Every other bit refuses publication. */
 enum {
     CBM_PIPELINE_FROZEN_FILE_DIAGNOSTIC = 1,
     CBM_PIPELINE_FROZEN_DIAGNOSTIC_INCOMPLETE = 2,
-    CBM_PIPELINE_FROZEN_DIAGNOSTIC_OOM = 4
+    CBM_PIPELINE_FROZEN_DIAGNOSTIC_OOM = 4,
+    CBM_PIPELINE_FROZEN_PARSE_GAP = 8,
+    /* A file indexed without configured test roles (degraded per file). */
+    CBM_PIPELINE_FROZEN_TEST_DECLARATION_GAP = 16
 };
 
 /* Clears supplied output first. Returns false for NULL owner/output or while
  * BUILDING; otherwise copies the mask. No overlap with build is permitted.
  * Evidence survives failed/invalid retries until owner free; no reset API.
  */
-bool cbm_pipeline_frozen_negative_evidence(const cbm_pipeline_frozen_t *owner,
-                                           unsigned *out_flags);
+bool cbm_pipeline_frozen_negative_evidence(const cbm_pipeline_frozen_t *owner, unsigned *out_flags);
 
 /* Borrowed copied path only after build returned OK; otherwise NULL. */
 const char *cbm_pipeline_frozen_candidate_path(const cbm_pipeline_frozen_t *owner);
@@ -354,16 +386,20 @@ static inline void cbm_pipeline_test_owner_error(CBMFileResult *result) {
     result->test_declarations_status = CBM_TEST_EXTRACT_UNSUPPORTED_FORM;
     result->test_declaration_index = -1;
     result->test_declaration_line = 0;
+    if (!result->has_error) {
+        result->test_error_only = true;
+    }
     result->has_error = true;
-    result->error_msg = cbm_arena_strdup(&result->arena,
-                                         "configured test body ownership could not be verified");
+    result->error_msg =
+        cbm_arena_strdup(&result->arena, "configured test body ownership could not be verified");
     if (!result->error_msg) {
         result->test_declarations_status = CBM_TEST_EXTRACT_OOM;
     }
+    cbm_test_declarations_degrade(result); /* per file, not the index */
 }
 
 static inline bool cbm_pipeline_test_result_ok(cbm_pipeline_ctx_t *ctx,
-                                                const CBMFileResult *result) {
+                                               const CBMFileResult *result) {
     if (result && result->test_declarations_status != CBM_TEST_EXTRACT_OK) {
         atomic_store(&ctx->test_declarations_failed, 1);
         return false;
@@ -380,8 +416,8 @@ static inline bool cbm_pipeline_test_result_ok(cbm_pipeline_ctx_t *ctx,
 static inline bool cbm_pipeline_test_definitions_apply(const cbm_pipeline_ctx_t *ctx,
                                                        CBMLanguage language) {
     const cbm_test_declarations_t *snapshot = ctx ? ctx->test_declarations : NULL;
-    if (!snapshot || (language != CBM_LANG_C && language != CBM_LANG_CPP &&
-                      language != CBM_LANG_CUDA)) {
+    if (!snapshot ||
+        (language != CBM_LANG_C && language != CBM_LANG_CPP && language != CBM_LANG_CUDA)) {
         return false;
     }
     bool enabled = false;
@@ -396,21 +432,19 @@ static inline bool cbm_pipeline_test_definitions_apply(const cbm_pipeline_ctx_t 
             continue;
         }
         const char *name = items[i].language;
-        if (name && ((language == CBM_LANG_C &&
-                      (strcmp(name, "c") == 0 || strcmp(name, "C") == 0)) ||
-                     (language == CBM_LANG_CPP &&
-                      (strcmp(name, "cpp") == 0 || strcmp(name, "c++") == 0 ||
-                       strcmp(name, "C++") == 0)) ||
-                     (language == CBM_LANG_CUDA &&
-                      (strcmp(name, "cuda") == 0 || strcmp(name, "CUDA") == 0)))) {
+        if (name &&
+            ((language == CBM_LANG_C && (strcmp(name, "c") == 0 || strcmp(name, "C") == 0)) ||
+             (language == CBM_LANG_CPP &&
+              (strcmp(name, "cpp") == 0 || strcmp(name, "c++") == 0 || strcmp(name, "C++") == 0)) ||
+             (language == CBM_LANG_CUDA &&
+              (strcmp(name, "cuda") == 0 || strcmp(name, "CUDA") == 0)))) {
             return true;
         }
     }
     return false;
 }
 
-static inline bool cbm_pipeline_test_extraction_ok(cbm_pipeline_ctx_t *ctx,
-                                                   CBMLanguage language,
+static inline bool cbm_pipeline_test_extraction_ok(cbm_pipeline_ctx_t *ctx, CBMLanguage language,
                                                    const CBMFileResult *result) {
     if (!result && cbm_pipeline_test_definitions_apply(ctx, language)) {
         atomic_store(&ctx->test_declarations_failed, 1);
@@ -1190,8 +1224,7 @@ void cbm_pipeline_set_lsp_surfaces(cbm_pipeline_t *p, cbm_lsp_surface_row_t *row
 const char *cbm_pipeline_repo_path(const cbm_pipeline_t *p);
 const cbm_test_declarations_t *cbm_pipeline_test_declarations(const cbm_pipeline_t *p);
 /* Without an active run snapshot this only validates fresh's source state. */
-bool cbm_pipeline_project_source_matches(const cbm_pipeline_t *p,
-                                          const cbm_userconfig_t *fresh);
+bool cbm_pipeline_project_source_matches(const cbm_pipeline_t *p, const cbm_userconfig_t *fresh);
 const cbm_index_resource_policy_t *cbm_pipeline_resource_policy(const cbm_pipeline_t *p);
 cbm_index_resource_violation_t *cbm_pipeline_resource_violation(cbm_pipeline_t *p);
 atomic_int *cbm_pipeline_cancelled_ptr(cbm_pipeline_t *p);
