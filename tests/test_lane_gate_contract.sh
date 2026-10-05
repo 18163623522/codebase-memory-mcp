@@ -143,6 +143,7 @@ manifest() { # dir leg shard slice-suites...
         echo "leg=$leg"
         echo "shard=$shard"
         echo "list_sha256=$sha"
+        [ -z "${SEL:-}" ] || echo "selection_sha256=$SEL"
         echo "--- slice ---"
         printf '%s\n' "$@"
     } >"$dir/shard-manifest.txt"
@@ -151,6 +152,13 @@ mkdir -p "$WORK/empty"
 manifest "$WORK/whole/m1" ubuntu-latest-gcc 1/1 a b c
 manifest "$WORK/lost/m1" ubuntu-latest-gcc 1/2 a
 manifest "$WORK/lost/m2" ubuntu-latest-gcc 2/2 b
+# A narrowed leg (smart CI): the shards must agree on the selection applied.
+SEL=s1 manifest "$WORK/selsame/m1" ubuntu-latest-gcc 1/2 a b
+SEL=s1 manifest "$WORK/selsame/m2" ubuntu-latest-gcc 2/2 c
+SEL=s1 manifest "$WORK/seldiff/m1" ubuntu-latest-gcc 1/2 a b
+SEL=s2 manifest "$WORK/seldiff/m2" ubuntu-latest-gcc 2/2 c
+SEL=s1 manifest "$WORK/selhalf/m1" ubuntu-latest-gcc 1/2 a b
+manifest "$WORK/selhalf/m2" ubuntu-latest-gcc 2/2 c
 
 union "no manifests, no selection given (dry run / release)" 1 "$WORK/empty"
 union "no manifests, selection 'all'" 1 "$WORK/empty" --lanes all
@@ -161,6 +169,9 @@ union "no manifests but the windows leg selected" 1 "$WORK/empty" --lanes '["lin
 union "a complete 1/1 leg" 0 "$WORK/whole" --lanes '["lint","security-static","unix-x86"]'
 union "a lost slice is still a gate-quality loss" 1 "$WORK/lost" --lanes '["lint","security-static","unix-x86"]'
 union "a malformed selection is a usage error" 2 "$WORK/empty" --lanes 'lint,unix-x86'
+union "shards that applied one test selection" 0 "$WORK/selsame" --lanes '["lint","security-static","unix-x86"]'
+union "shards that applied different test selections" 1 "$WORK/seldiff" --lanes '["lint","security-static","unix-x86"]'
+union "a narrowed shard next to a full one" 1 "$WORK/selhalf" --lanes '["lint","security-static","unix-x86"]'
 
 if [ "$failures" -ne 0 ]; then
     echo "LANE GATE CONTRACT VIOLATED: $failures case(s)" >&2

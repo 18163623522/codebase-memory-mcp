@@ -60,8 +60,12 @@ int tf_maybe_run_git_facts_diff_probe(int argc, char **argv) {
     }
     if (argc == 2 && argv && strcmp(argv[1], "__cbm_git_facts_hostile_diff_probe") == 0) {
         /* Only this isolated child mutates its environment, before harness threads start.
-         * Re-enter the existing exact-diff test; the parent process remains untouched. */
+         * Re-enter the existing exact-diff test; the parent process remains untouched.
+         * An inherited CBM_TEST_ONLY_FILE (a narrowed CI run) is cleared: the runner
+         * unions it with CBM_TEST_ONLY, and one naming this suite would re-run the
+         * spawning test, which spawns again. */
         if (cbm_setenv("GIT_DIFF_OPTS", "--unified=999", 1) != 0 ||
+            cbm_setenv("CBM_TEST_ONLY_FILE", "", 1) != 0 ||
             cbm_setenv(
                 "CBM_TEST_ONLY",
                 "test_impact_git:test_git_facts_diff_uses_merge_base_zero_context_and_nul_metadata",
@@ -944,6 +948,54 @@ TEST(test_git_facts_inherited_diff_options_cannot_override_zero_context) {
     ASSERT_TRUE(passed);
     PASS();
 }
+
+/* A narrowed CI run hands every runner process a CBM_TEST_ONLY_FILE. The
+ * hostile-diff child must still run exactly its own test: the runner unions
+ * the file with CBM_TEST_ONLY, so an inherited file would add its tests, and
+ * one naming this suite would make the child re-run the spawning test. */
+#define GF_OTHER_TEST "test_git_facts_rejects_malformed_options_and_expected_head_mismatch"
+TEST(test_git_facts_hostile_probe_ignores_an_inherited_selection_file) {
+    const char *home = th_mktempdir("cbm-git-diff-only");
+    ASSERT_NOT_NULL(home);
+    char log[GF_PATH];
+    char only[GF_PATH];
+    static const char token[] = "test_impact_git:" GF_OTHER_TEST "\n";
+    bool prepared = gf_runner_binary && gf_path(log, home, "child.log") &&
+                    gf_path(only, home, "only.txt") && gf_write(only, token, sizeof(token) - 1);
+    const char *inherited = getenv("CBM_TEST_ONLY_FILE");
+    char *saved = inherited ? cbm_strdup(inherited) : NULL;
+    bool set = prepared && (!inherited || saved) && cbm_setenv("CBM_TEST_ONLY_FILE", only, 1) == 0;
+    const char *argv[] = {gf_runner_binary, "__cbm_git_facts_hostile_diff_probe", NULL};
+    cbm_proc_opts_t options = {
+        .bin = gf_runner_binary, .argv = argv, .log_file = log, .quiet_timeout_ms = 60000};
+    cbm_proc_result_t result = {0};
+    int launched = set ? cbm_subprocess_run(&options, &result) : -1;
+    bool restored = saved ? cbm_setenv("CBM_TEST_ONLY_FILE", saved, 1) == 0
+                          : cbm_unsetenv("CBM_TEST_ONLY_FILE") == 0;
+    free(saved);
+    char detail[16384] = "";
+    FILE *file = launched == 0 ? cbm_fopen(log, "rb") : NULL;
+    if (file) {
+        size_t n = fread(detail, 1, sizeof(detail) - 1, file);
+        detail[n] = '\0';
+        (void)fclose(file);
+    }
+    bool own_test_only = launched == 0 && result.outcome == CBM_PROC_CLEAN &&
+                         result.exit_code == 0 &&
+                         strstr(detail, "test_git_facts_diff_uses_merge_base_zero_context") &&
+                         !strstr(detail, GF_OTHER_TEST);
+    if (!own_test_only && launched == 0) {
+        fprintf(stderr, "Isolated hostile-diff child: %s\n", detail);
+    }
+    int cleanup = th_rmtree(home);
+    ASSERT_EQ(cleanup, 0);
+    ASSERT_TRUE(set);
+    ASSERT_TRUE(restored);
+    ASSERT_EQ(launched, 0);
+    ASSERT_TRUE(own_test_only);
+    PASS();
+}
+#undef GF_OTHER_TEST
 
 /* Independent D1 inventory tests. Reuse the native local-object gf_* fixture
  * helpers above; construct byte-only names in Git objects, never on disk. */
@@ -2340,6 +2392,7 @@ SUITE(test_impact_git) {
     RUN_TEST(test_git_facts_inventory_cancellation_clears_prefix_and_latches);
     RUN_TEST(test_git_facts_inventory_output_limit_has_no_prefix_and_latches);
     RUN_TEST(test_git_facts_inherited_diff_options_cannot_override_zero_context);
+    RUN_TEST(test_git_facts_hostile_probe_ignores_an_inherited_selection_file);
     RUN_TEST(test_git_facts_gitfile_redirection_cannot_certify_false_ancestry);
     RUN_TEST(test_git_facts_pins_actual_merge_base_and_both_refs);
     RUN_TEST(test_git_facts_ref_index_and_worktree_mutation_cannot_change_snapshot);

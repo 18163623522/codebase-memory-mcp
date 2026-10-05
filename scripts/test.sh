@@ -54,6 +54,11 @@ Environment:
   CBM_RUN_HANG_TEST=1     Opt-in C++ index-hang regression (#410, needs prod).
   CBM_NO_CCACHE=1         Disable the content-verified compiler cache.
   CBM_TEST_SHARD/_LEG     Set by CI's sharded legs; leave unset locally.
+  CBM_TEST_SELECTION_DIR  PR CI's test selection (smart CI): a directory with
+                          test-only.txt (suite / suite:test lines) and
+                          optional-suites.txt. Narrows the parallel suite step
+                          only; contract steps and CBM_TEST_SEQUENTIAL=1 runs
+                          keep running everything.
 
 Examples:
   scripts/test.sh                          # the full venue leg (what CI runs)
@@ -375,6 +380,10 @@ bash "$ROOT/tests/test_coverage_map.sh"
 # selection a map that claims tests ran functions they never touched.
 echo "=== Step 0z7: incremental coverage map merge contract ==="
 bash "$ROOT/tests/test_coverage_merge.sh"
+# Step 0z8: the one place a test-impact answer becomes what PR CI runs. Only a
+# well-formed, self-consistent selection may narrow; everything else runs all.
+echo "=== Step 0z8: test selection (answer -> runner filter) contract ==="
+bash "$ROOT/tests/test_test_impact_selection.sh"
 
 if [ "$CONTRACTS_ONLY" -eq 1 ]; then
     echo "=== test.sh: contracts-only — every contract step passed ==="
@@ -402,11 +411,38 @@ assert_test_runner_build_config "$BUILD_DIR/test-runner" "$EXPECTED_SANITIZED"
 # tests is a property of the harness every later result depends on.
 echo "=== Step 2b: per-test selection regression (CBM_TEST_ONLY) ==="
 CBM_TEST_RUNNER="$ROOT/$BUILD_DIR/test-runner" bash "$ROOT/tests/test_harness_test_only.sh"
+# Step 2c: PR CI's test selection (smart CI) through the parallel harness — the
+# selected suites only, unknown suites and tests fail, conditional ones drop.
+echo "=== Step 2c: parallel-harness test selection regression ==="
+CBM_TEST_RUNNER="$ROOT/$BUILD_DIR/test-runner" bash "$ROOT/tests/test_harness_selection.sh"
+
+# PR CI's test selection (smart CI, the select-tests job) narrows the parallel
+# suite step and nothing else (scripts/run-tests-parallel.sh). A selection that
+# was promised but is missing is a plumbing fault: fail, never run silently.
+SELECTION_ENV=()
+if [ -n "${CBM_TEST_SELECTION_DIR:-}" ]; then
+    selection_dir="$CBM_TEST_SELECTION_DIR"
+    if command -v cygpath > /dev/null 2>&1; then
+        selection_dir="$(cygpath -u "$selection_dir")"
+    fi
+    if [ ! -s "$selection_dir/test-only.txt" ]; then
+        echo "FAIL: CBM_TEST_SELECTION_DIR=$CBM_TEST_SELECTION_DIR holds no test-only.txt" >&2
+        exit 1
+    fi
+    SELECTION_ENV=(CBM_TEST_SELECTION_FILE="$selection_dir/test-only.txt")
+    if [ -f "$selection_dir/optional-suites.txt" ]; then
+        SELECTION_ENV+=(CBM_TEST_SELECTION_OPTIONAL="$selection_dir/optional-suites.txt")
+    fi
+    if [ "${CBM_TEST_SEQUENTIAL:-0}" = "1" ]; then
+        echo "test.sh: CBM_TEST_SEQUENTIAL=1 runs every test; the selection narrows the parallel harness only"
+    fi
+fi
 
 if [ "${CBM_TEST_SEQUENTIAL:-0}" = "1" ]; then
     make -f Makefile.cbm test ${MAKE_ARGS[@]+"${MAKE_ARGS[@]}"}
 else
-    make -f Makefile.cbm test-par ${MAKE_ARGS[@]+"${MAKE_ARGS[@]}"}
+    env ${SELECTION_ENV[@]+"${SELECTION_ENV[@]}"} \
+        make -f Makefile.cbm test-par ${MAKE_ARGS[@]+"${MAKE_ARGS[@]}"}
 fi
 
 # Step 4: C++ large-TU index-hang regression guard (#410). Runs the PROD binary

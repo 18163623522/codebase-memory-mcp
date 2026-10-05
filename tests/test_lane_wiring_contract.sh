@@ -14,6 +14,11 @@
 #      job: matrix lanes as a "lane":"<name>" tag in the leg data (the tag
 #      ci-ok reads back from the job name), single lanes by an `if:` that
 #      names them. A lane nothing serves would be selected and never run.
+#   4. the test selection (smart CI) is PR-only and fails open: _test.yml's
+#      test_selection defaults to empty and only test-unix / test-windows
+#      read it; dry runs and releases never pass it; pr.yml's select-tests
+#      runs only under vars.TEST_IMPACT_MODE == 'gate', ci-ok does not need it,
+#      and `test` passes a selection only from a successful narrowed run.
 # Text-level checks (no YAML library on every leg), like the other workflow
 # contracts.
 #
@@ -60,9 +65,9 @@ for caller in ("dry-run.yml", "release.yml"):
     for job, body in jobs(text(caller)).items():
         called = re.search(r"uses: \./\.github/workflows/(_\w+\.yml)", body)
         if called and called.group(1) in REUSABLE:
-            require(not re.search(r"(?m)^\s+(lanes|shard_profile):", body),
-                    f"{caller} job {job} passes a lane selection to {called.group(1)}; "
-                    f"dry runs and releases must run every lane")
+            require(not re.search(r"(?m)^\s+(lanes|shard_profile|test_selection):", body),
+                    f"{caller} job {job} passes a lane or test selection to {called.group(1)}; "
+                    f"dry runs and releases must run every lane and every test")
 m = re.search(r"(?ms)^      shard_profile:\n(.*?)(?=^      \S|^\S|\Z)", text("_test.yml"))
 require(m is not None and re.search(r"(?m)^        default: standard$", m.group(1)) is not None,
         "_test.yml must declare a shard_profile input defaulting to standard")
@@ -115,6 +120,32 @@ require("scripts/ci/test-impact-shadow.sh --binary" in shadow
 test_wf = jobs(text("_test.yml"))
 require('--lanes "$LANES"' in test_wf.get("shard-completeness", ""),
         "shard-completeness must pass the selection to verify-shard-union.sh")
+
+# 4. the test selection: PR-only, fails open.
+m = re.search(r"(?ms)^      test_selection:\n(.*?)(?=^      \S|^\S|\Z)", text("_test.yml"))
+require(m is not None and re.search(r"(?m)^        default: ''$", m.group(1)) is not None,
+        "_test.yml must declare a test_selection input defaulting to '' (every test)")
+readers = sorted(job for job, body in test_wf.items() if "inputs.test_selection" in body)
+require(readers == ["test-unix", "test-windows"],
+        f"only test-unix and test-windows may read test_selection, found {readers}")
+for job in ("test-unix", "test-windows"):
+    require("CBM_TEST_SELECTION_DIR: ${{ inputs.test_selection != '' && " in test_wf.get(job, ""),
+            f"_test.yml {job} must hand the selection to scripts/test.sh as CBM_TEST_SELECTION_DIR "
+            f"only when one was passed")
+select = pr.get("select-tests", "")
+require(re.search(r"(?m)^    if: \$\{\{ vars\.TEST_IMPACT_MODE == 'gate' \}\}$", select) is not None,
+        "pr.yml select-tests must run only when vars.TEST_IMPACT_MODE == 'gate'")
+require("scripts/ci/test-impact-select.sh" in select and "--gate" in select,
+        "pr.yml select-tests must run scripts/ci/test-impact-select.sh --gate")
+require("select-tests" not in needs,
+        "ci-ok must not need select-tests: a broken selection runs every test, never blocks")
+test_job = pr.get("test", "")
+require(re.search(r"(?m)^    needs: \[changes, lint, select-tests\]$", test_job) is not None
+        and "!cancelled()" in test_job,
+        "pr.yml test must need select-tests and still run when it is skipped or failed")
+require("test_selection: ${{ needs.select-tests.result == 'success' && "
+        "needs.select-tests.outputs.selection == 'narrowed' && 'test-selection' || '' }}" in test_job,
+        "pr.yml test must pass a selection only from a successful, narrowed select-tests run")
 
 # 3. every lane is served by a job.
 MATRIX = {"unix-x86": "_test.yml", "unix-arm64": "_test.yml", "unix-macos14": "_test.yml",

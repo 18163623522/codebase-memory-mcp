@@ -8,7 +8,9 @@
 # For every leg it asserts: all shards agree on the shard count, indices form
 # exactly 1..n, every shard saw the same full suite list, and the UNION of the
 # shard slices equals that list — a rename/re-shard can never silently drop a
-# suite (gate-quality loss) without failing here.
+# suite (gate-quality loss) without failing here. A narrowed leg (PR CI test
+# selection) records the selected list and its selection_sha256; all shards
+# must agree on that too.
 #
 # No manifests at all is a failure — unless the PR's lane selection (--lanes,
 # the JSON list from scripts/ci/select-lanes.sh) holds no test leg, in which
@@ -20,7 +22,7 @@ set -eu
 
 case "${1:-}" in
 -h | --help)
-    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
 esac
@@ -75,6 +77,16 @@ for leg in $(grep -h '^leg=' $files | sort -u | sed 's/^leg=//'); do
     list_sha=$(grep -h '^list_sha256=' $leg_files | sed 's/^list_sha256=//' | sort -u)
     if [ "$(printf '%s\n' "$list_sha" | wc -l)" -ne 1 ]; then
         echo "FAIL: $leg shards saw different suite lists" >&2
+        rc=1
+        continue
+    fi
+    # A narrowed leg: every shard must have applied the same test selection
+    # (two selections can name the same suites and different tests).
+    sel_sha=$(for f in $leg_files; do
+        grep -h '^selection_sha256=' "$f" || echo "selection_sha256=none"
+    done | sort -u)
+    if [ "$(printf '%s\n' "$sel_sha" | wc -l)" -ne 1 ]; then
+        echo "FAIL: $leg shards applied different test selections" >&2
         rc=1
         continue
     fi
