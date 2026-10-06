@@ -120,12 +120,16 @@ static bool gf_git_exit(gf_fixture_t *fx, const char *const *tail, int expected_
         argv[n++] = tail[i];
     }
     argv[n] = NULL;
+    /* No quiet timeout: the fixture waits for Git to finish, and the suite's
+     * own ceiling is the backstop. A diff-driver control runs a fresh copy of
+     * the test runner under `git diff`; on a loaded or Windows host that copy
+     * took over 10 s to start and finish, and a 10 s quiet timeout killed Git
+     * (outcome HANG) -- the timeout, not the assertion, decided the test. */
     cbm_proc_opts_t opts = {.bin = fx->git,
                             .argv = argv,
                             .stdout_file = fx->capture,
                             .log_file = fx->log,
-                            .strip_git_repo_env = true,
-                            .quiet_timeout_ms = 10000};
+                            .strip_git_repo_env = true};
     cbm_proc_result_t result = {0};
     cbm_proc_outcome_t expected_outcome =
         expected_exit == 0 ? CBM_PROC_CLEAN : CBM_PROC_EXIT_NONZERO;
