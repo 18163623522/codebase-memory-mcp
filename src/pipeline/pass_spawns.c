@@ -22,7 +22,7 @@ static const double SPAWN_CONF_EXPANDED = 0.5;
 
 /* Strategies that only guess by name: they never make a spawn spelling an
  * ordinary call (`subprocess.run` must not become the project's `run`, nor
- * a C `system(...)` the static `system` of another file). */
+ * a call of the C library's `system` the static `system` of another file). */
 static bool spawn_name_guess(const char *strategy) {
     static const char *const guesses[] = {"unique_name",     "suffix_match", "qualified_suffix",
                                           "field_type_hint", "fuzzy",        NULL};
