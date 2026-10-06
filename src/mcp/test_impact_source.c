@@ -127,17 +127,54 @@ bool cbm_ti_is_keyword(const char *word, size_t len) {
 
 /* ── Line patterns ─────────────────────────────────────────────────── */
 
-/* `^\s*(//.*|/\*.*|\*.*|.*\*\/\s*)?$` */
+/* The offset of the first "*" + "/" in s[from..to), or `to`. */
+static size_t ti_comment_close(const char *s, size_t from, size_t to) {
+    for (size_t i = from; i + 1 < to; i++) {
+        if (s[i] == '*' && s[i + 1] == '/') {
+            return i;
+        }
+    }
+    return to;
+}
+
+/* A line that is nothing but comment: blank; `//`; a block opened here with
+ * nothing after its first close; a block-comment line (`*` then whitespace or
+ * the end); a close with nothing after it; or the closing line of a block
+ * opened earlier (ends in the close, opens none). Anything else is code: a
+ * line starting `*name`, `**` or `*(` dereferences, and code before a
+ * trailing comment is a change. The reference pattern
+ * `^\s*(//.*|/\*.*|\*.*|.*\*\/\s*)?$` took both for comments, and a PR's
+ * `*out = f(..., true);` edits seeded nothing. A line-local view cannot tell
+ * `* text` from a multiplication continuation; the project's format keeps
+ * binary operators at line ends, so that spelling stays a comment line. */
 bool cbm_ti_line_is_comment(const char *s, size_t n) {
     size_t i = ti_skip_space(s, 0, n);
-    if (i == n || s[i] == '*') {
-        return true;
-    }
-    if (s[i] == '/' && i + 1 < n && (s[i + 1] == '/' || s[i + 1] == '*')) {
+    if (i == n) {
         return true;
     }
     size_t e = ti_trim_end(s, i, n);
-    return e - i >= 2 && s[e - 2] == '*' && s[e - 1] == '/';
+    if (s[i] == '/' && i + 1 < e && s[i + 1] == '/') {
+        return true;
+    }
+    if (s[i] == '/' && i + 1 < e && s[i + 1] == '*') {
+        size_t close = ti_comment_close(s, i + 2, e);
+        return close == e || close + 2 == e;
+    }
+    if (s[i] == '*') {
+        if (i + 1 < e && s[i + 1] == '/') {
+            return i + 2 == e;
+        }
+        return i + 1 == e || ti_space(s[i + 1]);
+    }
+    if (e - i >= 2 && s[e - 2] == '*' && s[e - 1] == '/') {
+        for (size_t k = i; k + 1 < e; k++) {
+            if (s[k] == '/' && s[k + 1] == '*') {
+                return false;
+            }
+        }
+        return true;
+    }
+    return false;
 }
 
 /* `^\s*#\s*(if|ifdef|ifndef|elif|else|endif|undef|include)\b` */

@@ -33,7 +33,8 @@ static const tis_line_t tis_lines[] = {
     {"// x", true, false, "", "", "", "", "", ""},
     {"  /* x", true, false, "", "", "", "", "", ""},
     {" * x", true, false, "", "", "", "", "", ""},
-    {"int x; /* c */", true, false, "", "", "", "", "", ""},
+    /* Code with a trailing comment is code (the reference called it a comment). */
+    {"int x; /* c */", false, false, "", "", "", "", "", ""},
     {"int x;", false, false, "", "", "", "", "", ""},
     {"x */  ", true, false, "", "", "", "", "", ""},
     {"*/", true, false, "", "", "", "", "", ""},
@@ -132,6 +133,42 @@ TEST(test_impact_source_line_patterns_match_the_reference) {
             printf("  line %zu: \"%s\"\n", i, s);
         }
         ASSERT_TRUE(ok);
+    }
+    PASS();
+}
+
+/* Only a line that is nothing but comment counts as one: a change to any
+ * other line is a change to code. A dereference at the start of a line read
+ * as a block-comment line once and dropped a real edit's seed. */
+TEST(test_impact_source_only_whole_comment_lines_are_comments) {
+    static const struct {
+        const char *line;
+        bool comment;
+    } cases[] = {
+        {"                    *out_jax_path = extract_route_path_from_args(a, args, source, true);",
+         false},
+        {"*out = 1;", false},
+        {"  **pp = q;", false},
+        {"  *(p + 1) = 0;", false},
+        {"  x = f(); /* why */", false},
+        {"/* a */ x = 1;", false},
+        {"*/ x = 1;", false},
+        {" * a block-comment line", true},
+        {" *", true},
+        {" */", true},
+        {"\t*\tindented */", true},
+        {"/* whole */", true},
+        {"/** doc", true},
+        {"   end of the comment */", true},
+        {"// line", true},
+        {"", true},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        if (cbm_ti_line_is_comment(cases[i].line, strlen(cases[i].line)) != cases[i].comment) {
+            printf("  comment-line case %zu: \"%s\" expected %d\n", i, cases[i].line,
+                   cases[i].comment);
+            FAIL("a line was classified wrongly");
+        }
     }
     PASS();
 }
@@ -316,6 +353,7 @@ TEST(test_impact_source_lines_split_like_the_reference) {
 
 SUITE(test_impact_source) {
     RUN_TEST(test_impact_source_line_patterns_match_the_reference);
+    RUN_TEST(test_impact_source_only_whole_comment_lines_are_comments);
     RUN_TEST(test_impact_source_declaration_tries_the_patterns_in_order);
     RUN_TEST(test_impact_source_macros_carry_body_names_and_pastes);
     RUN_TEST(test_impact_source_paste_scan_follows_the_reference);

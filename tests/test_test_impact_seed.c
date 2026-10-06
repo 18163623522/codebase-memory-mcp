@@ -153,6 +153,61 @@ TEST(test_impact_seed_hunks_follow_the_reference) {
     PASS();
 }
 
+/* A line that starts with a dereference is code, and so is code with a
+ * trailing comment: each such change seeds its definition. The comment
+ * filter read `*out = f(...)` as a block-comment line, so a PR's two real
+ * edits in scan_route_annotations seeded nothing, and six tests that execute
+ * it were not selected (oracle job pr2158). A comment-only edit still
+ * seeds nothing. */
+TEST(test_impact_seed_dereference_and_trailing_comment_lines_are_code) {
+    const char *files[] = {"src/a.c", "void f(int *out) {\n  *out = g(1);\n}\n"
+                                      "int h(void) {\n  return 1; /* one */\n}\n"};
+    tsd_fixture_t f;
+    ASSERT_TRUE(tsd_open(&f, files, 2));
+    int64_t fn = tsd_node(&f, "Function", "f", "src/a.c", 1, 3);
+    int64_t h = tsd_node(&f, "Function", "h", "src/a.c", 4, 6);
+
+    static const char *const deref[] = {"  *out = g(1, true);"};
+    static const char *const old_deref[] = {"  *out = g(1);"};
+    cbm_diff_hunk_t edit = {.start = 2,
+                            .count = 1,
+                            .added = deref,
+                            .added_count = 1,
+                            .removed = old_deref,
+                            .removed_count = 1};
+    cbm_ti_change_t change = {.path = "src/a.c", .hunks = &edit, .hunk_count = 1};
+    cbm_ti_seeds_t *s = tsd_seed(&f, &change, 1);
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(tsd_seed_count(s), 1);
+    ASSERT_TRUE(tsd_seeded(s, fn));
+    cbm_ti_seeds_free(s);
+
+    static const char *const value[] = {"  return 2; /* one */"};
+    static const char *const old_value[] = {"  return 1; /* one */"};
+    cbm_diff_hunk_t trailing = {.start = 5,
+                                .count = 1,
+                                .added = value,
+                                .added_count = 1,
+                                .removed = old_value,
+                                .removed_count = 1};
+    change.hunks = &trailing;
+    s = tsd_seed(&f, &change, 1);
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(tsd_seed_count(s), 1);
+    ASSERT_TRUE(tsd_seeded(s, h));
+    cbm_ti_seeds_free(s);
+
+    static const char *const note[] = {"   * why the dereference stays"};
+    cbm_diff_hunk_t comment = {.start = 2, .count = 1, .added = note, .added_count = 1};
+    change.hunks = &comment;
+    s = tsd_seed(&f, &change, 1);
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(tsd_seed_count(s), 0);
+    cbm_ti_seeds_free(s);
+    tsd_close(&f);
+    PASS();
+}
+
 /* A changed test case or suite body is reported, never seeded. */
 TEST(test_impact_seed_changed_cases_and_suites_are_reported) {
     const char *files[] = {"tests/t.c", "TEST(alpha) {\n  PASS();\n}\n"
@@ -372,6 +427,7 @@ TEST(test_impact_seed_variant_spans_seed_their_definition) {
 
 SUITE(test_impact_seed) {
     RUN_TEST(test_impact_seed_hunks_follow_the_reference);
+    RUN_TEST(test_impact_seed_dereference_and_trailing_comment_lines_are_code);
     RUN_TEST(test_impact_seed_variant_spans_seed_their_definition);
     RUN_TEST(test_impact_seed_changed_cases_and_suites_are_reported);
     RUN_TEST(test_impact_seed_deleted_names_are_found_by_text);
