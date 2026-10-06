@@ -1839,13 +1839,28 @@ static bool gfb_matches(gfb_fixture_t *f, cbm_git_revision_t rev, const size_t *
     return true;
 }
 
+/* A failed Git facts call names its stage and error: these fixtures fail
+ * intermittently on macos-15-intel CI only, and a bare ASSERT left nothing to
+ * attribute. */
+static void gfb_report(const char *stage, const cbm_git_facts_error_t *e) {
+    fprintf(stderr, "Git facts %s failed: status=%d exit=%d diagnostic=%.300s\n", stage, e->status,
+            e->exit_code, e->diagnostic);
+}
+
 static bool gfb_inventory_control(gfb_fixture_t *f, cbm_git_facts_t *facts) {
     cbm_git_facts_error_t error;
+    memset(&error, 0, sizeof(error));
     cbm_git_tree_inventory_t inventory={0};
     const cbm_git_facts_identity_t *id=cbm_git_facts_identity(facts);
-    return id && strcmp(id->merge_base,f->git.q)==0 && strcmp(id->merge_base,f->git.p)!=0 &&
-        cbm_git_facts_inventory(facts,CBM_GIT_REV_HEAD,&inventory,&error) &&
-        gfi_matches(&inventory,f->expected,GFB_COUNT);
+    if (!id || strcmp(id->merge_base,f->git.q)!=0 || strcmp(id->merge_base,f->git.p)==0) {
+        fprintf(stderr, "Git facts identity control failed: identity=%d\n", id != NULL);
+        return false;
+    }
+    if (!cbm_git_facts_inventory(facts,CBM_GIT_REV_HEAD,&inventory,&error)) {
+        gfb_report("inventory", &error);
+        return false;
+    }
+    return gfi_matches(&inventory,f->expected,GFB_COUNT);
 }
 
 static bool gfb_good(gfb_fixture_t *f, cbm_git_facts_t *facts, cbm_git_revision_t rev,
@@ -1854,8 +1869,10 @@ static bool gfb_good(gfb_fixture_t *f, cbm_git_facts_t *facts, cbm_git_revision_
     cbm_git_blob_batch_request_t request={rev,indices,count};
     cbm_git_blob_batch_t out=gfb_poisoned(); cbm_git_facts_error_t error;
     memset(&error,0xa5,sizeof(error));
-    bool ok=cbm_git_facts_read_blob_batch(facts,&request,limits,&out,&error) &&
-        gfa_clean_error(&error) && gfb_matches(f,rev,indices,count,&out);
+    bool read=cbm_git_facts_read_blob_batch(facts,&request,limits,&out,&error);
+    if (!read || !gfa_clean_error(&error))
+        gfb_report(read ? "blob batch (unclean error)" : "blob batch", &error);
+    bool ok=read && gfa_clean_error(&error) && gfb_matches(f,rev,indices,count,&out);
     if (keep) *keep=out;
     return ok;
 }
@@ -1929,6 +1946,7 @@ TEST(test_git_blob_batch_pinned_revisions_and_cache_history_guards) {
     bool restored=removed && gf_ref(&f.git,"refs/heads/topic",f.git.head) &&
         gf_ref(&f.git,"refs/heads/base",f.git.base);
     opts=gf_options(&f.git);facts=restored?cbm_git_facts_open(&opts,&error):NULL;
+    if (restored && !facts) gfb_report("open (shallow control)", &error);
     bool shallow_before=facts && gfb_good(&f,facts,CBM_GIT_REV_HEAD,&index,1,&limits,NULL);
     n=snprintf(graft,sizeof(graft),"%s\n",f.git.q);
     bool shallow_written=restored && n>0 && (size_t)n<sizeof(graft) &&
@@ -2034,6 +2052,7 @@ TEST(test_git_blob_batch_exact_frame_caps_and_native_split_batches) {
         cbm_git_facts_options_t opts=gf_options(&f.git);
         opts.stdout_limit=variant==2?exact-1:exact;
         cbm_git_facts_error_t error;cbm_git_facts_t *facts=cbm_git_facts_open(&opts,&error);
+        if (!facts) gfb_report("open (budget variant)", &error);
         bool opened=facts && gfb_inventory_control(&f,facts);
         controls=opened && controls;
         if(variant==0)outcomes=opened &&
