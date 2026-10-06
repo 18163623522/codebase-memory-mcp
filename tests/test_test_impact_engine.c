@@ -134,13 +134,24 @@ static bool tie_open_with(tie_fixture_t *fx, const char *extra_path, const char 
     return tie_open_files(fx, files, 1);
 }
 
+/* A directory's canonical form: realpath on POSIX (macOS temp dirs sit behind
+ * the /var -> /private/var link), _fullpath on Windows, which has no realpath,
+ * with forward slashes like every path the fixture builds from it. */
+static bool tie_full_path(char out[PATH_MAX], const char *path) {
+#ifdef _WIN32
+    return path && _fullpath(out, path, PATH_MAX) != NULL && cbm_normalize_path_sep(out) != NULL;
+#else
+    return path && realpath(path, out) != NULL;
+#endif
+}
+
 /* The fixture, plus (path, content) pairs written over it in the base commit. */
 static bool tie_open_files(tie_fixture_t *fx, const char *const *extra, int extra_count) {
     memset(fx, 0, sizeof(*fx));
     const char *git = cbm_find_cli("git", cbm_get_home_dir());
     const char *home = th_mktempdir("cbm-ti-engine");
     char real[PATH_MAX];
-    if (!git || !home || !realpath(home, real) || strlen(git) >= sizeof(fx->git)) {
+    if (!git || !home || !tie_full_path(real, home) || strlen(git) >= sizeof(fx->git)) {
         return false;
     }
     snprintf(fx->git, sizeof(fx->git), "%s", git);

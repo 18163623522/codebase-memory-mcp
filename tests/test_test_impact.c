@@ -8,6 +8,7 @@
  */
 #include "test_framework.h"
 #include "test_helpers.h"
+#include <cli/cli.h>
 #include <foundation/subprocess.h>
 #include <mcp/test_impact.h>
 #include <mcp/test_impact_result.h>
