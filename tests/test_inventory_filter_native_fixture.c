@@ -22,8 +22,11 @@ static bool if_native_write(const char *path, const void *bytes, size_t length) 
 }
 static bool if_native_run(if_native *n, const cbm_proc_opts_t *options) {
     cbm_subprocess_t *process = NULL;
-    if (cbm_subprocess_spawn(options, &process) != 0)
+    if (cbm_subprocess_spawn(options, &process) != 0) {
+        fprintf(stderr, "inventory native Git spawn failed errno=%d (%s)\n", errno,
+                options->argv[5] ? options->argv[5] : "?");
         return false;
+    }
     uint64_t deadline = cbm_now_ms() + 60000;
     bool cancelled = false;
     cbm_proc_result_t result = {0};
@@ -175,19 +178,27 @@ bool if_native_start(if_native *n) {
         n->unquiesced = true;
     const cbm_git_facts_identity_t *identity = cbm_git_facts_identity(n->facts);
     if (!identity || error.status != CBM_GIT_FACTS_OK || strcmp(identity->head, n->head) ||
-        strcmp(identity->merge_base, n->head))
+        strcmp(identity->merge_base, n->head)) {
+        fprintf(stderr, "inventory native facts status=%d identity=%d diagnostic=%s\n",
+                error.status, identity != NULL, error.diagnostic);
         return false;
+    }
     cbm_git_tree_inventory_t inventory;
     if (!cbm_git_facts_inventory(n->facts, CBM_GIT_REV_HEAD, &inventory, &error) ||
         inventory.count != n->input.source.file_count) {
         if (error.status == CBM_GIT_FACTS_SUPERVISION)
             n->unquiesced = true;
+        fprintf(stderr, "inventory native inventory status=%d diagnostic=%s\n", error.status,
+                error.diagnostic);
         return false;
     }
     for (size_t i = 0; i < inventory.count; i++)
         if (strcmp(inventory.entries[i].path, n->input.paths[i]) ||
-            strcmp(inventory.entries[i].oid, n->input.files[i].oid))
+            strcmp(inventory.entries[i].oid, n->input.files[i].oid)) {
+            fprintf(stderr, "inventory native inventory row %zu differs: %s\n", i,
+                    inventory.entries[i].path);
             return false;
+        }
     return if_native_tree(n);
 }
 bool if_native_tree(if_native *n) {
@@ -213,12 +224,17 @@ bool if_native_tree(if_native *n) {
     }
     const cbm_pinned_tree_view_t *v = cbm_pinned_tree_view(n->input.tree);
     if (!v || v->revision != CBM_GIT_REV_HEAD || strcmp(v->commit, n->head) ||
-        v->file_count != n->input.source.file_count)
+        v->file_count != n->input.source.file_count) {
+        fprintf(stderr, "inventory native view differs: files=%zu\n", v ? v->file_count : 0);
         return false;
+    }
     for (size_t i = 0; i < v->file_count; i++) {
         if (strcmp((const char *)v->files[i].path, n->input.paths[i]) ||
-            memcmp(v->files[i].content_sha256, n->input.files[i].content_sha256, 32))
+            memcmp(v->files[i].content_sha256, n->input.files[i].content_sha256, 32)) {
+            fprintf(stderr, "inventory native view row %zu differs: %s\n", i,
+                    (const char *)v->files[i].path);
             return false;
+        }
         cbm_inventory_file_t *f = &n->input.files[i];
         f->git_mode = v->files[i].git_mode;
         memcpy(f->oid, v->files[i].oid, 65);
@@ -238,10 +254,14 @@ bool if_native_dependency(if_native *n) {
         size_t copied = SIZE_MAX;
         cbm_pinned_tree_error_t error;
         cbm_pinned_tree_control_t control = {.deadline_ms = UINT64_MAX};
-        if (cbm_pinned_tree_read_prefix(n->input.tree, i, 16384, bytes, sizeof(bytes), &copied,
-                                        &control, &error) != CBM_PINNED_TREE_OK ||
-            copied != n->input.files[i].content_length || memcmp(bytes, n->input.bytes[i], copied))
+        cbm_pinned_tree_status_t read = cbm_pinned_tree_read_prefix(
+            n->input.tree, i, 16384, bytes, sizeof(bytes), &copied, &control, &error);
+        if (read != CBM_PINNED_TREE_OK || copied != n->input.files[i].content_length ||
+            memcmp(bytes, n->input.bytes[i], copied)) {
+            fprintf(stderr, "inventory native read %zu status=%d copied=%zu want=%llu\n", i, read,
+                    copied, (unsigned long long)n->input.files[i].content_length);
             return false;
+        }
     }
     const cbm_pinned_tree_view_t *view = cbm_pinned_tree_view(n->input.tree);
     return view && view->file_count == 10;

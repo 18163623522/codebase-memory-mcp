@@ -6,7 +6,9 @@
 int if_case_native(void) {
     if_native n = {0};
     int result = 1;
-    IF_CHECK(if_dependency_control() && if_native_start(&n) && if_native_dependency(&n));
+    IF_CHECK(if_dependency_control());
+    IF_CHECK(if_native_start(&n));
+    IF_CHECK(if_native_dependency(&n));
     /* Dependency witnesses finish before the first new-feature assertion. */
     IF_CHECK(if_prepare(&n.input));
     const if_row rows[] = {
