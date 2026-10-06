@@ -34,6 +34,15 @@ printf '  7863 passed, 1 failed\n=== All tests passed ===\n' > "$WORK/red_with_m
 printf '  100 passed, 0 failed\n  200 passed, 3 failed\n=== All tests passed ===\n' > "$WORK/red_later_suite"
 printf '  7925 passed, 0 failed, 74 skipped\n' > "$WORK/no_marker"
 printf 'configure: something exploded\n' > "$WORK/no_summary"
+# The full leg's own contract steps print runner-shaped lines: a stubbed
+# canonical entry echoes the marker, a capacity case prints "expected=0
+# passed=True". On 2026-10-06 a leg that stopped at a later step with no suite
+# run was reported green from exactly these lines.
+printf '%s\n' '=== Step 0y2: isolated Windows venue contract ===' \
+    'canonical-test <CC=clang>' '=== All tests passed ===' \
+    'capacity_accept exit=0 expected=0 passed=True' \
+    '=== Step 0z6: per-test coverage map builder contract ===' \
+    'FAIL: missing output: tests.tsv' > "$WORK/marker_before_last_step"
 
 failures=0
 expect() { # description log rc want [mode]
@@ -60,6 +69,10 @@ expect "failures in a LATER suite are still counted" red_later_suite 0 1
 # Incomplete runs are never green: a leg that stopped after one suite has a
 # summary but no marker.
 expect "a summary without the completion marker is red" no_marker 0 1
+# The marker is the last thing the full leg prints; one followed by another
+# step came from that step's output, not from the end of the leg.
+expect "a marker before the last step is red with a lost rc" marker_before_last_step 1 1
+expect "a marker before the last step is red with rc 0" marker_before_last_step 0 1
 
 # No summary at all keeps its own distinct code, so "never ran" stays
 # distinguishable from "ran and failed".
@@ -82,4 +95,4 @@ if [ "$failures" -gt 0 ]; then
     echo "VM verdict contract VIOLATED: $failures case(s)" >&2
     exit 1
 fi
-echo "VM verdict contract passed (12 cases: lost exit status, false green, partial runs, iteration mode)"
+echo "VM verdict contract passed (14 cases: lost exit status, false green, partial runs, iteration mode)"

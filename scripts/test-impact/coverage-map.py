@@ -323,10 +323,10 @@ def main():
     if not args.keep_raw:
         shutil.rmtree(raw, ignore_errors=True)
 
-    with open(os.path.join(out, "functions.tsv"), "w", encoding="utf-8") as handle:
+    with open(os.path.join(out, "functions.tsv"), "w", encoding="utf-8", newline="\n") as handle:
         for ident, source, short in functions.rows():
             handle.write(f"{ident}\t{source}\t{short}\n")
-    with open(os.path.join(out, "tests.tsv"), "w", encoding="utf-8") as handle:
+    with open(os.path.join(out, "tests.tsv"), "w", encoding="utf-8", newline="\n") as handle:
         handle.write("\n".join(test_rows) + "\n")
     meta = {
         "format": 1,
@@ -339,7 +339,7 @@ def main():
         "incomplete": sum(entry["incomplete"] for entry in suite_meta),
         "suites": suite_meta,
     }
-    with open(os.path.join(out, "meta.json"), "w", encoding="utf-8") as handle:
+    with open(os.path.join(out, "meta.json"), "w", encoding="utf-8", newline="\n") as handle:
         json.dump(meta, handle, indent=1)
         handle.write("\n")
     print(f"map: {meta['tests']} tests, {meta['incomplete']} incomplete, "

@@ -37,6 +37,21 @@ fi
 
 # Strict LLVM text records retain zero-only identities and full counter values.
 PYTHONDONTWRITEBYTECODE=1 "${PYTHON}" "${ROOT}/tests/test_profile_text_parser.py"
+# Pure single-image v2 producer.
+PYTHONDONTWRITEBYTECODE=1 "${PYTHON}" "${ROOT}/tests/test_profile_map_v2.py"
+
+if "${PYTHON}" -c 'import sys; sys.exit(sys.platform != "win32")'; then
+    # WHY: the map is built only by the ubuntu-24.04 publish job
+    # (.github/workflows/test-impact-artifact.yml), and this leg's runner and
+    # LLVM tools are bash fakes. Tried: the leg under the native (mingw) python3
+    # the Windows test legs install, on the Windows VM -- CreateProcess cannot
+    # start an extensionless shebang script, the builder stops at its tool
+    # check ("not found: .../bin/llvm-profdata", exit 2), and every assertion
+    # after it fails for that one reason, so the run proves nothing about how
+    # the publish job builds a map.
+    echo "SKIP: builder functional leg needs a POSIX python (native Windows python3); profile-text contract passed"
+    exit 0
+fi
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
@@ -213,6 +228,3 @@ if [[ "${FAILED}" -ne 0 ]]; then
     exit 1
 fi
 echo "coverage map builder: all cases passed"
-
-# Pure single-image v2 producer; legacy parser and builder controls ran above.
-PYTHONDONTWRITEBYTECODE=1 "${PYTHON}" "${ROOT}/tests/test_profile_map_v2.py"

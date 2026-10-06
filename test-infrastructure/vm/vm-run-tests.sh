@@ -69,7 +69,13 @@ vm_verdict() {
     local complete
     failed_total=$(grep -Eo '[0-9]+ failed' "$log" | grep -Eo '^[0-9]+' |
         awk '{s += $1} END {print s + 0}')
-    complete=$(grep -c '=== All tests passed ===' "$log")
+    # The marker counts only as the last step header of the log: the full leg's
+    # own contract steps echo runner-shaped lines (a stubbed entry prints the
+    # marker), so a marker followed by another step is that step's output.
+    complete=0
+    if [ "$(grep -E '^=== ' "$log" | tail -n 1 | tr -d '\r')" = '=== All tests passed ===' ]; then
+        complete=1
+    fi
     if [ "${failed_total:-0}" -gt 0 ]; then
         echo "GUARD: the log reports $failed_total failed test(s) (runner rc=$rc)" >&2
         return 1

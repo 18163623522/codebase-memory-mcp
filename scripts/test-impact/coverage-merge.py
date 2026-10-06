@@ -116,15 +116,15 @@ def main() -> int:
         suites.append(entry)
 
     os.makedirs(args.out, exist_ok=True)
-    with open(os.path.join(args.out, "functions.tsv"), "w", encoding="utf-8") as handle:
+    with open(os.path.join(args.out, "functions.tsv"), "w", encoding="utf-8", newline="\n") as handle:
         handle.write("".join(line + "\n" for line in fresh_lines))
-    with open(os.path.join(args.out, "tests.tsv"), "w", encoding="utf-8") as handle:
+    with open(os.path.join(args.out, "tests.tsv"), "w", encoding="utf-8", newline="\n") as handle:
         for suite, test, status, reason, ids in merged:
             handle.write(f"{suite}:{test}\t{status}\t{reason}\t{' '.join(map(str, ids))}\n")
     meta = dict(fresh_meta)
     meta.update({"commit": args.commit, "tests": sum(c[0] for c in counts.values()),
                  "incomplete": sum(c[1] for c in counts.values()), "suites": suites})
-    with open(os.path.join(args.out, "meta.json"), "w", encoding="utf-8") as handle:
+    with open(os.path.join(args.out, "meta.json"), "w", encoding="utf-8", newline="\n") as handle:
         json.dump(meta, handle, indent=1)
         handle.write("\n")
     print(f"merged: {len(rerun)} suite(s) re-run, "

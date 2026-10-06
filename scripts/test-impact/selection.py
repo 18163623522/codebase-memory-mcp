@@ -106,6 +106,9 @@ def main():
     f.add_argument("--optional-out")
     args = parser.parse_args()
     if args.command == "suites":
+        # LF on every host, like the files below: a Windows python would
+        # otherwise write CRLF.
+        sys.stdout.reconfigure(newline="\n")
         with open(args.answer, encoding="utf-8") as handle:
             print("\n".join(suites(json.load(handle))))
         return 0
@@ -121,11 +124,11 @@ def main():
         return run_all("the answer is not an object")
     code, lines = lane_filter(answer, args.lane)
     if code in (NARROWED, NOTHING):
-        with open(args.out, "w", encoding="utf-8") as handle:
+        with open(args.out, "w", encoding="utf-8", newline="\n") as handle:
             handle.write("".join(line + "\n" for line in lines))
         if args.optional_out:
             optional = conditional_suites(answer, args.lane) if code == NARROWED else []
-            with open(args.optional_out, "w", encoding="utf-8") as handle:
+            with open(args.optional_out, "w", encoding="utf-8", newline="\n") as handle:
                 handle.write("".join(suite + "\n" for suite in optional))
     return code
 

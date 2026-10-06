@@ -38,7 +38,10 @@ printf 'a\nb\n' > "$TMP/listed.txt"
 python3 "$MERGE" --previous "$TMP/previous" --fresh "$TMP/fresh" --suites "$TMP/listed.txt" \
     --commit 3333333333333333333333333333333333333333 --out "$TMP/out" > /dev/null
 
-cmp -s "$TMP/out/functions.tsv" "$TMP/fresh/functions.tsv" || fail "the function table is not the new image's"
+# Byte-exact, trailing newlines included (no cmp: diffutils is not on the
+# Windows legs).
+[ "$(cat "$TMP/out/functions.tsv"; echo .)" = "$(cat "$TMP/fresh/functions.tsv"; echo .)" ] ||
+    fail "the function table is not the new image's"
 expected="$(printf 'a:*\tcomplete\t\t\na:t1\tcomplete\t\t0 1\nb:*\tcomplete\t\t\nb:t2\tincomplete\tkilled child\t2\n')"
 [ "$(cat "$TMP/out/tests.tsv")" = "$expected" ] || fail "merged rows: $(cat "$TMP/out/tests.tsv")"
 python3 - "$TMP/out/meta.json" <<'EOF' || fail "merged metadata"

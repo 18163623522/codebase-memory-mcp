@@ -147,7 +147,9 @@ finish
 begin "empty variables are no filter"
 CBM_TEST_ONLY="" CBM_TEST_ONLY_FILE="" run empty "${NAMED_SUITE}" "${OTHER_SUITE}"
 expect "exit status" "${RC}" 0
-if ! cmp -s "${tmpdir}/unfiltered.out" "${OUT}"; then
+# Byte-exact, trailing newlines included (no cmp: diffutils is not on the
+# Windows legs).
+if [ "$(cat "${tmpdir}/unfiltered.out"; echo .)" != "$(cat "${OUT}"; echo .)" ]; then
     echo "  FAIL ${CASE}: output differs from the unfiltered run"
     CASE_OK=0
 fi
