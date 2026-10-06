@@ -92,7 +92,7 @@ for leg in $(grep -h '^leg=' $files | sort -u | sed 's/^leg=//'); do
     fi
     union_sha=$(for f in $leg_files; do
         sed -n '/^--- slice ---$/,$p' "$f" | tail -n +2
-    done | sort | sha256sum | awk '{print $1}')
+    done | sort | { sha256sum 2>/dev/null || shasum -a 256; } | awk '{print $1}')
     if [ "$union_sha" != "$list_sha" ]; then
         echo "FAIL: $leg union of shard slices != full suite list (GATE-QUALITY LOSS)" >&2
         rc=1
