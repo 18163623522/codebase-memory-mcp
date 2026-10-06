@@ -715,6 +715,22 @@ static bool gf_resolve(cbm_git_facts_t *facts, const char *ref, char out[65],
            gf_oid_line(facts, &result.out, out, error);
 }
 
+#ifdef _WIN32
+/* MSYS2 and Cygwin git print absolute paths in their own namespace:
+ * /c/Users/x (Cygwin: /cygdrive/c/Users/x). The drive form maps one to one
+ * onto C:/Users/x, which the native file checks below need. Any other path of
+ * that namespace (/tmp, /usr) needs the runtime's mount table, so it stays
+ * unmapped and is refused as not absolute. */
+static const char *gf_native_metadata_path(cbm_git_facts_t *facts, const char *path) {
+    const char *drive = strncmp(path, "/cygdrive/", 10) == 0 ? path + 9 : path;
+    bool letter = (drive[1] >= 'A' && drive[1] <= 'Z') || (drive[1] >= 'a' && drive[1] <= 'z');
+    if (drive[0] != '/' || !letter || (drive[2] != '/' && drive[2] != '\0'))
+        return path;
+    char upper = (char)(drive[1] >= 'a' ? drive[1] - 'a' + 'A' : drive[1]);
+    return cbm_arena_sprintf(&facts->arena, "%c:/%s", upper, drive[2] ? drive + 3 : "");
+}
+#endif
+
 static bool gf_rev_metadata(cbm_git_facts_t *facts, const char *option, bool absolute,
                             const char **out, cbm_git_facts_error_t *error) {
     const char *args[] = {"rev-parse", "--path-format=absolute", option};
@@ -722,6 +738,10 @@ static bool gf_rev_metadata(cbm_git_facts_t *facts, const char *option, bool abs
     if (!gf_run(facts, args, 3, false, &result, error) ||
         !gf_owned_line(facts, &result.out, out, error))
         return false;
+#ifdef _WIN32
+    if (absolute && !(*out = gf_native_metadata_path(facts, *out)))
+        return gf_error(error, CBM_GIT_FACTS_OOM, "Cannot retain Git metadata path");
+#endif
     if (absolute && !gf_absolute(*out))
         return gf_error(error, CBM_GIT_FACTS_COMMAND, "Git metadata path is not absolute");
     return true;
