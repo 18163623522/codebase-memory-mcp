@@ -1120,6 +1120,10 @@ static int g_force_spawn_eagain = 0;
 void cbm_subprocess_force_spawn_eagain_for_testing(int attempts) {
     g_force_spawn_eagain = attempts > 0 ? attempts : 0;
 }
+static int g_hold_until_exit = 0;
+void cbm_subprocess_hold_parent_until_child_exits_for_testing(int spawns) {
+    g_hold_until_exit = spawns > 0 ? spawns : 0;
+}
 int cbm_subprocess_pending_spawn_eagain_for_testing(void) {
     return g_force_spawn_eagain;
 }
@@ -1396,6 +1400,14 @@ static int cbm_posix_spawn_apple(cbm_subprocess_t *process, int input, int outpu
 }
 #endif
 
+/* The child exited and waits to be reaped (WNOWAIT leaves it for the
+ * supervision to collect with its exit status). */
+static bool cbm_posix_child_exited(pid_t pid) {
+    siginfo_t info;
+    memset(&info, 0, sizeof(info));
+    return waitid(P_PID, (id_t)pid, &info, WEXITED | WNOHANG | WNOWAIT) == 0 && info.si_pid == pid;
+}
+
 static int cbm_subprocess_spawn_posix(cbm_subprocess_t *process) {
     int input_flags = O_RDONLY;
 #ifdef O_CLOEXEC
@@ -1522,12 +1534,24 @@ static int cbm_subprocess_spawn_posix(cbm_subprocess_t *process) {
         (void)close(stdout_capture);
     }
 
+#ifdef CBM_ENABLE_TEST_SEAMS
+    if (g_hold_until_exit > 0) {
+        g_hold_until_exit--;
+        siginfo_t held;
+        (void)waitid(P_PID, (id_t)pid, &held, WEXITED | WNOWAIT);
+    }
+#endif
     /* Parent and child both establish the group, removing scheduler-order races.
      * If the child won and already execed, EACCES is accepted only after proving
-     * that its process group is the expected isolated one. */
+     * that its process group is the expected isolated one. A child that already
+     * EXITED is a finished run, not a failed spawn: macOS no longer shows an
+     * unreaped child to setpgid/getpgid (ESRCH), and on a loaded machine a short
+     * command (`git write-tree`) finishes before the parent gets here. Its group
+     * was set before exec, by the spawn attributes or by the child itself; the
+     * supervision below reaps it with its real exit status. */
     bool contained = setpgid(pid, pid) == 0;
     if (!contained && (errno == EACCES || errno == EPERM || errno == ESRCH)) {
-        contained = getpgid(pid) == pid;
+        contained = getpgid(pid) == pid || cbm_posix_child_exited(pid);
     }
     if (!contained) {
         (void)kill(pid, SIGKILL);

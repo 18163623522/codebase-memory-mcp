@@ -137,6 +137,24 @@ TEST(subprocess_run_exit_nonzero) {
 #endif
 }
 
+/* A short command can finish before its parent checks the child's process
+ * group; macOS then answers ESRCH for the exited, unreaped child. That is a
+ * finished run with its own exit status, never a spawn failure (macOS CI read
+ * `git write-tree` as SPAWN_FAILED errno 3 under load). The seam holds the
+ * parent until the child has exited: that order, deterministically. */
+TEST(subprocess_run_child_exited_before_group_check) {
+#ifdef _WIN32
+    SKIP_PLATFORM("POSIX process groups");
+#else
+    cbm_subprocess_hold_parent_until_child_exits_for_testing(1);
+    cbm_proc_result_t r = run_sh("exit 3", 0);
+    cbm_subprocess_hold_parent_until_child_exits_for_testing(0);
+    ASSERT_EQ(r.outcome, CBM_PROC_EXIT_NONZERO);
+    ASSERT_EQ(r.exit_code, 3);
+    PASS();
+#endif
+}
+
 /* Daemon background helpers intentionally invoke fixed tool names such as
  * `curl` and `git`. A shell-free spawn must still perform the normal PATH
  * lookup for a name without a directory separator; exact binary paths keep
@@ -1844,8 +1862,7 @@ static bool sp_stdin_clean(int rc, const cbm_proc_result_t *result) {
  * may be destroyed, but a nonquiescent tree's fixture is intentionally retained. */
 static bool sp_stdin_safe_run(int rc, const cbm_proc_result_t *result) {
     return result->tree_quiesced ||
-           (rc == -1 && result->outcome == CBM_PROC_SPAWN_FAILED &&
-            !result->supervision_failed);
+           (rc == -1 && result->outcome == CBM_PROC_SPAWN_FAILED && !result->supervision_failed);
 }
 
 static bool sp_stdin_finish(cbm_subprocess_t *process, cbm_proc_result_t *result) {
@@ -1860,8 +1877,7 @@ static bool sp_stdin_finish(cbm_subprocess_t *process, cbm_proc_result_t *result
 }
 
 static int sp_stdin_run(cbm_proc_opts_t *opts, cbm_proc_result_t *result) {
-    const char *argv[] = {sp_stdout_test_binary, "__cbm_subprocess_stdin_probe", "echo", "",
-                          NULL};
+    const char *argv[] = {sp_stdout_test_binary, "__cbm_subprocess_stdin_probe", "echo", "", NULL};
     opts->bin = sp_stdout_test_binary;
     opts->argv = argv;
     opts->quiet_timeout_ms = 10000; /* Finite containment guard, not a timing oracle. */
@@ -1884,12 +1900,10 @@ static sp_stdin_rejection_t sp_stdin_check_rejection(const char *binary, const c
                                                      const char *valid_empty_input) {
     sp_stdin_rejection_t check = {.safe_cleanup = true};
     (void)cbm_unlink(marker);
-    check.prepared = sp_stdin_write(out, sp_stdin_out_sentinel,
-                                    sizeof(sp_stdin_out_sentinel) - 1) &&
-                     sp_stdin_write(log, sp_stdin_log_sentinel,
-                                    sizeof(sp_stdin_log_sentinel) - 1) &&
-                     sp_stdout_file_equals(valid_empty_input, "", 0) &&
-                     !cbm_file_exists(marker);
+    check.prepared =
+        sp_stdin_write(out, sp_stdin_out_sentinel, sizeof(sp_stdin_out_sentinel) - 1) &&
+        sp_stdin_write(log, sp_stdin_log_sentinel, sizeof(sp_stdin_log_sentinel) - 1) &&
+        sp_stdout_file_equals(valid_empty_input, "", 0) && !cbm_file_exists(marker);
     if (!check.prepared)
         return check;
     const char *argv[] = {binary, "__cbm_subprocess_stdin_probe", "stamp", marker, NULL};
@@ -1922,8 +1936,7 @@ static sp_stdin_rejection_t sp_stdin_check_rejection(const char *binary, const c
     cbm_proc_result_t result = {0};
     rc = cbm_subprocess_run(&opts, &result);
     check.safe_cleanup = sp_stdin_safe_run(rc, &result);
-    check.reusable = sp_stdin_clean(rc, &result) &&
-                     sp_stdout_file_equals(out, "", 0) &&
+    check.reusable = sp_stdin_clean(rc, &result) && sp_stdout_file_equals(out, "", 0) &&
                      sp_stdout_file_equals(log, sp_stderr_text, sizeof(sp_stderr_text) - 1) &&
                      sp_stdout_file_equals(valid_empty_input, "", 0);
     return check;
@@ -1938,16 +1951,15 @@ static int sp_stdin_probe(int argc, char **argv) {
         return 101;
 #endif
     if (argc == 8 && strcmp(argv[2], "reject") == 0) {
-        sp_stdin_rejection_t check = sp_stdin_check_rejection(
-            argv[0], argv[3], argv[4], argv[5], argv[6], argv[7]);
+        sp_stdin_rejection_t check =
+            sp_stdin_check_rejection(argv[0], argv[3], argv[4], argv[5], argv[6], argv[7]);
         if (!check.safe_cleanup)
             return 125; /* Parent must retain files if nested containment failed. */
         if (!check.prepared)
             return 102;
         if (!check.reusable)
             return 103;
-        return check.rejected && check.no_handle && check.outputs_unchanged &&
-                       check.no_child_marker
+        return check.rejected && check.no_handle && check.outputs_unchanged && check.no_child_marker
                    ? 0
                    : 104;
     }
@@ -1977,8 +1989,7 @@ static int sp_stdin_probe(int argc, char **argv) {
             _lseek(cbm_fileno(stdin), 0, SEEK_SET) != 0)
             return 107;
 #else
-        if (read(cbm_fileno(stdin), &witness, 1) != 1 ||
-            lseek(cbm_fileno(stdin), 0, SEEK_SET) != 0)
+        if (read(cbm_fileno(stdin), &witness, 1) != 1 || lseek(cbm_fileno(stdin), 0, SEEK_SET) != 0)
             return 107;
 #endif
         const char *child_argv[] = {argv[0], "__cbm_subprocess_stdin_probe", "echo", "", NULL};
@@ -2040,8 +2051,13 @@ TEST(subprocess_stdin_null_is_eof_even_with_readable_parent_input) {
     unsigned char input[SP_STDIN_BYTES];
     sp_stdin_payload(input);
     bool prepared = sp_stdin_write(fx.other, input, sizeof(input));
-    const char *argv[] = {sp_stdout_test_binary, "__cbm_subprocess_stdin_probe", "parent-eof",
-                          fx.other, fx.out, fx.log, NULL};
+    const char *argv[] = {sp_stdout_test_binary,
+                          "__cbm_subprocess_stdin_probe",
+                          "parent-eof",
+                          fx.other,
+                          fx.out,
+                          fx.log,
+                          NULL};
     cbm_proc_opts_t opts = {.bin = sp_stdout_test_binary, .argv = argv, .quiet_timeout_ms = 20000};
     cbm_proc_result_t result = {0};
     int rc = prepared ? cbm_subprocess_run(&opts, &result) : -1;
@@ -2070,8 +2086,7 @@ TEST(subprocess_stdin_empty_regular_file_is_success) {
     cbm_proc_result_t result = {0};
     int rc = prepared ? sp_stdin_run(&opts, &result) : -1;
     bool safe = !prepared || sp_stdin_safe_run(rc, &result);
-    bool exact = sp_stdout_file_equals(fx.out, "", 0) &&
-                 sp_stdout_file_equals(fx.other, "", 0) &&
+    bool exact = sp_stdout_file_equals(fx.out, "", 0) && sp_stdout_file_equals(fx.other, "", 0) &&
                  sp_stdout_file_equals(fx.log, sp_stderr_text, sizeof(sp_stderr_text) - 1);
     int cleanup = safe ? th_rmtree(fx.root) : -1;
     ASSERT_EQ(cleanup, 0);
@@ -2182,9 +2197,8 @@ TEST(subprocess_stdin_caller_path_mutation_before_gate_release) {
     bool safe = !process || sp_stdin_finish(process, &result);
     bool exact = sp_stdout_file_equals(fx.out, input, sizeof(input));
     bool original_kept = sp_stdout_file_equals(fx.other, input, sizeof(input));
-    bool alternate_kept = prepared &&
-                          sp_stdout_file_equals(alternate, alternate_bytes,
-                                                sizeof(alternate_bytes) - 1);
+    bool alternate_kept =
+        prepared && sp_stdout_file_equals(alternate, alternate_bytes, sizeof(alternate_bytes) - 1);
     int cleanup = safe ? th_rmtree(fx.root) : -1;
     ASSERT_EQ(cleanup, 0);
     ASSERT_TRUE(prepared);
@@ -2202,8 +2216,8 @@ TEST(subprocess_stdin_rejects_invalid_paths_before_outputs) {
     sp_stdout_fixture_t fx;
     ASSERT_TRUE(sp_stdout_fixture_open(&fx));
     char missing[SP_STDOUT_PATH];
-    bool prepared = sp_stdout_path(missing, fx.root, "missing-input") &&
-                    sp_stdin_write(fx.other, "", 0);
+    bool prepared =
+        sp_stdout_path(missing, fx.root, "missing-input") && sp_stdin_write(fx.other, "", 0);
     const char *paths[] = {"", missing, fx.root};
     sp_stdin_rejection_t checks[3] = {{0}};
     bool safe = true;
@@ -2274,8 +2288,15 @@ TEST(subprocess_stdin_posix_fifo_and_symlink_reject_without_blocking_runner) {
     bool safe = true;
     for (int i = 0; kinds && safe && i < 2; i++) {
         (void)cbm_unlink(fx.gate);
-        const char *argv[] = {sp_stdout_test_binary, "__cbm_subprocess_stdin_probe", "reject",
-                              paths[i], fx.out, fx.log, fx.gate, fx.other, NULL};
+        const char *argv[] = {sp_stdout_test_binary,
+                              "__cbm_subprocess_stdin_probe",
+                              "reject",
+                              paths[i],
+                              fx.out,
+                              fx.log,
+                              fx.gate,
+                              fx.other,
+                              NULL};
         /* The probe can itself block inside spawn on a broken blocking FIFO
          * open. Only that isolated process is then killed by this safety guard.
          * No elapsed-time threshold is used as evidence of correct rejection. */
@@ -2323,6 +2344,7 @@ SUITE(subprocess) {
     RUN_TEST(subprocess_outcome_str);
     RUN_TEST(subprocess_run_clean);
     RUN_TEST(subprocess_run_exit_nonzero);
+    RUN_TEST(subprocess_run_child_exited_before_group_check);
     RUN_TEST(subprocess_run_resolves_literal_binary_name_from_path);
     RUN_TEST(subprocess_run_crash_is_crash);
     RUN_TEST(subprocess_run_hang_is_hang);

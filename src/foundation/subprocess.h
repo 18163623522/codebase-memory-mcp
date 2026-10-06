@@ -206,6 +206,11 @@ bool cbm_build_win_cmd_payload(char *buf, size_t cap, const char *cmd_executable
  * of hoping a loaded machine reproduces it. Test builds only. */
 void cbm_subprocess_force_spawn_eagain_for_testing(int attempts);
 int cbm_subprocess_pending_spawn_eagain_for_testing(void);
+/* Hold the parent of the next N POSIX spawns until the child has exited (left
+ * unreaped) before it checks the child's process group: the order a loaded
+ * machine produces when a short command finishes before the parent runs
+ * again. Test builds only. */
+void cbm_subprocess_hold_parent_until_child_exits_for_testing(int spawns);
 #endif
 
 /* How the POSIX fork+exec child closed its inherited descriptors (#1484). */
