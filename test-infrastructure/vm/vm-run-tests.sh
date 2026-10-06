@@ -60,20 +60,22 @@ vm_verdict() {
     local log="$1"
     local rc="$2"
     local mode="${3:-full}"
-    if ! grep -Eq '[0-9]+ passed' "$log"; then
+    # -a: a NUL or UTF-16 byte anywhere makes grep call the log binary and
+    # print no matches, which would count its failures as zero.
+    if ! grep -aEq '[0-9]+ passed' "$log"; then
         echo "GUARD: test runner produced no completion summary — the suites did" \
             "not validly run; treating as failure (runner rc=$rc)" >&2
         return 90
     fi
     local failed_total
     local complete
-    failed_total=$(grep -Eo '[0-9]+ failed' "$log" | grep -Eo '^[0-9]+' |
+    failed_total=$(grep -aEo '[0-9]+ failed' "$log" | grep -Eo '^[0-9]+' |
         awk '{s += $1} END {print s + 0}')
     # The marker counts only as the last step header of the log: the full leg's
     # own contract steps echo runner-shaped lines (a stubbed entry prints the
     # marker), so a marker followed by another step is that step's output.
     complete=0
-    if [ "$(grep -E '^=== ' "$log" | tail -n 1 | tr -d '\r')" = '=== All tests passed ===' ]; then
+    if [ "$(grep -aE '^=== ' "$log" | tail -n 1 | tr -d '\r')" = '=== All tests passed ===' ]; then
         complete=1
     fi
     if [ "${failed_total:-0}" -gt 0 ]; then

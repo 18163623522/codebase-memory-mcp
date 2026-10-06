@@ -43,6 +43,10 @@ printf '%s\n' '=== Step 0y2: isolated Windows venue contract ===' \
     'capacity_accept exit=0 expected=0 passed=True' \
     '=== Step 0z6: per-test coverage map builder contract ===' \
     'FAIL: missing output: tests.tsv' > "$WORK/marker_before_last_step"
+# A NUL or a UTF-16 byte-order mark anywhere (PowerShell 5.1 redirects in
+# UTF-16LE) makes grep call the log binary and print no matches with -o: the
+# failures after it were counted as zero.
+printf '  10 passed, 0 failed\n\377\376b\000o\000m\000\n  5 passed, 2 failed\n' > "$WORK/binary_bytes"
 
 failures=0
 expect() { # description log rc want [mode]
@@ -73,6 +77,8 @@ expect "a summary without the completion marker is red" no_marker 0 1
 # step came from that step's output, not from the end of the leg.
 expect "a marker before the last step is red with a lost rc" marker_before_last_step 1 1
 expect "a marker before the last step is red with rc 0" marker_before_last_step 0 1
+# Bytes grep calls binary must not hide the failures after them.
+expect "failures after binary bytes are red in iteration mode" binary_bytes 0 1 iteration
 
 # No summary at all keeps its own distinct code, so "never ran" stays
 # distinguishable from "ran and failed".
@@ -95,4 +101,4 @@ if [ "$failures" -gt 0 ]; then
     echo "VM verdict contract VIOLATED: $failures case(s)" >&2
     exit 1
 fi
-echo "VM verdict contract passed (14 cases: lost exit status, false green, partial runs, iteration mode)"
+echo "VM verdict contract passed (15 cases: lost exit status, false green, partial runs, iteration mode)"
