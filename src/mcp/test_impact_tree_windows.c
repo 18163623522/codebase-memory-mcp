@@ -2,7 +2,13 @@
 #ifdef _WIN32
 
 bool tpt_win_error(tpt_context *c, DWORD e, bool creating) {
-    if (creating && (e == ERROR_ALREADY_EXISTS || e == ERROR_FILE_EXISTS))
+    /* Creating a file over a directory of the same (case-folded) name answers
+     * ERROR_ACCESS_DENIED rather than "exists"; with the attempted name
+     * present it is the same collision. Both create sites leave that name in
+     * wide_path. */
+    bool present = creating && e == ERROR_ACCESS_DENIED &&
+                   GetFileAttributesW(c->tree->wide_path) != INVALID_FILE_ATTRIBUTES;
+    if (creating && (e == ERROR_ALREADY_EXISTS || e == ERROR_FILE_EXISTS || present))
         return tpt_fail(c, CBM_PINNED_TREE_COLLISION, "exclusive native name already exists");
     if (e == ERROR_NOT_ENOUGH_MEMORY || e == ERROR_OUTOFMEMORY)
         return tpt_fail(c, CBM_PINNED_TREE_OOM, "native allocation failed");
