@@ -122,14 +122,20 @@ static const char tie_lib[] = "int lib_value(void) {\n"
                               "    return 2;\n"
                               "}\n";
 
-static bool tie_open_with(tie_fixture_t *fx, const char *extra_path, const char *extra);
+static bool tie_open_files(tie_fixture_t *fx, const char *const *extra, int extra_count);
 
 static bool tie_open(tie_fixture_t *fx) {
-    return tie_open_with(fx, NULL, NULL);
+    return tie_open_files(fx, NULL, 0);
 }
 
 /* The fixture, plus one more file in the base commit. */
 static bool tie_open_with(tie_fixture_t *fx, const char *extra_path, const char *extra) {
+    const char *const files[] = {extra_path, extra};
+    return tie_open_files(fx, files, 1);
+}
+
+/* The fixture, plus (path, content) pairs written over it in the base commit. */
+static bool tie_open_files(tie_fixture_t *fx, const char *const *extra, int extra_count) {
     memset(fx, 0, sizeof(*fx));
     const char *git = cbm_find_cli("git", cbm_get_home_dir());
     const char *home = th_mktempdir("cbm-ti-engine");
@@ -145,15 +151,18 @@ static bool tie_open_with(tie_fixture_t *fx, const char *extra_path, const char 
     const char *init[] = {"-c",      "init.templateDir=",     "init",
                           "--quiet", "--initial-branch=main", NULL};
     const char *topic[] = {"checkout", "--quiet", "-b", "topic", NULL};
-    return th_mkdir_p(fx->repo) == 0 && th_mkdir_p(fx->work) == 0 && chmod(fx->work, 0700) == 0 &&
-           tie_git(fx, init) && tie_write(fx, ".codebase-memory.json", tie_config) &&
-           tie_write(fx, "tests/test_main.c", tie_main) &&
-           tie_write(fx, "tests/test_alpha.c", tie_alpha) &&
-           tie_write(fx, "tests/test_beta.c", tie_beta) &&
-           tie_write(fx, "tests/test_matrix.c", tie_matrix) &&
-           tie_write(fx, "src/lib.c", tie_lib) && tie_write(fx, "Makefile", "all:\n") &&
-           (!extra_path || tie_write(fx, extra_path, extra)) && tie_commit(fx, "base") &&
-           tie_git(fx, topic);
+    bool ok = th_mkdir_p(fx->repo) == 0 && th_mkdir_p(fx->work) == 0 &&
+              chmod(fx->work, 0700) == 0 && tie_git(fx, init) &&
+              tie_write(fx, ".codebase-memory.json", tie_config) &&
+              tie_write(fx, "tests/test_main.c", tie_main) &&
+              tie_write(fx, "tests/test_alpha.c", tie_alpha) &&
+              tie_write(fx, "tests/test_beta.c", tie_beta) &&
+              tie_write(fx, "tests/test_matrix.c", tie_matrix) &&
+              tie_write(fx, "src/lib.c", tie_lib) && tie_write(fx, "Makefile", "all:\n");
+    for (int i = 0; ok && i < extra_count; i++) {
+        ok = tie_write(fx, extra[2 * i], extra[2 * i + 1]);
+    }
+    return ok && tie_commit(fx, "base") && tie_git(fx, topic);
 }
 
 static void tie_close(tie_fixture_t *fx) {
@@ -463,7 +472,96 @@ TEST(test_impact_engine_coverage_reaches_unmapped_code_through_mapped_callers) {
     PASS();
 }
 
+/* One test written once per #if branch is one graph node (graph_buffer.c
+ * "Definition variants"): the engine maps it as the graph counts it, never as
+ * an ambiguous name. */
+static const char tie_alpha_variants[] = "int lib_value(void);\n"
+                                         "#ifdef ALPHA_WIDE\n"
+                                         "TEST(alpha_uses_lib) {\n"
+                                         "    return lib_value() == 1 ? 0 : 1;\n"
+                                         "}\n"
+                                         "#else\n"
+                                         "TEST(alpha_uses_lib) {\n"
+                                         "    return lib_value() > 0 ? 0 : 1;\n"
+                                         "}\n"
+                                         "#endif\n"
+                                         "TEST(alpha_plain) {\n"
+                                         "    return 0;\n"
+                                         "}\n"
+                                         "SUITE(alpha) {\n"
+                                         "    RUN_TEST(alpha_uses_lib);\n"
+                                         "    RUN_TEST(alpha_plain);\n"
+                                         "}\n";
+
+TEST(test_impact_engine_variant_tests_are_one_test) {
+    tie_fixture_t fx;
+    ASSERT_TRUE(tie_open_with(&fx, "tests/test_alpha.c", tie_alpha_variants));
+    ASSERT_TRUE(tie_write(&fx, "src/lib.c",
+                          "int lib_value(void) {\n    return 1 + 0;\n}\n"
+                          "int lib_other(void) {\n    return 2;\n}\n"));
+    ASSERT_TRUE(tie_commit(&fx, "change lib_value"));
+    char *json = tie_answer(&fx);
+    ASSERT_NOT_NULL(json);
+    if (!tie_suite_has(json, "alpha", "STATIC") || tie_suite_has(json, "alpha", "UNMAPPED")) {
+        printf("  %.900s\n", json);
+    }
+    ASSERT_TRUE(tie_suite_has(json, "alpha", "STATIC"));
+    ASSERT_FALSE(tie_suite_has(json, "alpha", "UNMAPPED"));
+    free(json);
+    tie_close(&fx);
+    PASS();
+}
+
+/* A test that starts a program runs code no CALLS edge leads to; the program
+ * runs main, and main reaches everything. A change that reaches the product's
+ * main reaches the tests that spawn; one that does not, does not. */
+static const char tie_spawn_main[] = "int lib_value(void);\n"
+                                     "int main(void) {\n"
+                                     "    return lib_value();\n"
+                                     "}\n";
+static const char tie_spawn_beta[] = "#include <stdlib.h>\n"
+                                     "TEST(beta_alone) {\n"
+                                     "    return system(\"./app --version\");\n"
+                                     "}\n"
+                                     "SUITE(beta) {\n"
+                                     "    RUN_TEST(beta_alone);\n"
+                                     "}\n";
+
+TEST(test_impact_engine_spawning_tests_follow_main) {
+    const char *const extra[] = {"src/main.c", tie_spawn_main, "tests/test_beta.c", tie_spawn_beta};
+    tie_fixture_t fx;
+    ASSERT_TRUE(tie_open_files(&fx, extra, 2));
+    ASSERT_TRUE(tie_write(&fx, "src/lib.c",
+                          "int lib_value(void) {\n    return 1 + 0;\n}\n"
+                          "int lib_other(void) {\n    return 2;\n}\n"));
+    ASSERT_TRUE(tie_commit(&fx, "change lib_value"));
+    char *json = tie_answer(&fx);
+    ASSERT_NOT_NULL(json);
+    if (!tie_suite_has(json, "beta", "STATIC")) {
+        printf("  %.900s\n", json);
+    }
+    ASSERT_TRUE(tie_suite_has(json, "alpha", "STATIC"));
+    ASSERT_TRUE(tie_suite_has(json, "beta", "STATIC"));
+    ASSERT_FALSE(tie_suite_has(json, "matrix", "STATIC"));
+    free(json);
+
+    /* lib_other: main never calls it, so the spawning test is not reached. */
+    ASSERT_TRUE(tie_write(&fx, "src/lib.c",
+                          "int lib_value(void) {\n    return 1;\n}\n"
+                          "int lib_other(void) {\n    return 2 + 0;\n}\n"));
+    ASSERT_TRUE(tie_commit(&fx, "change lib_other instead"));
+    json = tie_answer(&fx);
+    ASSERT_NOT_NULL(json);
+    ASSERT_TRUE(tie_suite_has(json, "matrix", "STATIC"));
+    ASSERT_FALSE(tie_suite_has(json, "beta", "STATIC"));
+    free(json);
+    tie_close(&fx);
+    PASS();
+}
+
 SUITE(test_impact_engine) {
+    RUN_TEST(test_impact_engine_variant_tests_are_one_test);
+    RUN_TEST(test_impact_engine_spawning_tests_follow_main);
     RUN_TEST(test_impact_engine_reached_suites_carry_static);
     RUN_TEST(test_impact_engine_macro_registered_tests_select_their_suite);
     RUN_TEST(test_impact_engine_rules_unmapped_and_empty);

@@ -22,8 +22,10 @@
  * reached, never expanded (their caller is the runner's main). */
 #define TE_RUNNER_ROLE_PREFIX "tf_maybe_run_"
 
-static const char *const te_walk_types[] = {"CALLS", "ASYNC_CALLS", "USAGE", "CALL_REFERENCE",
-                                            "READS"};
+/* SPAWNS only carries reach from a Process node, which enters the walk
+ * through te_spawn_lift alone. */
+static const char *const te_walk_types[] = {"CALLS",          "ASYNC_CALLS", "USAGE",
+                                            "CALL_REFERENCE", "READS",       "SPAWNS"};
 
 typedef struct {
     int64_t *items;
@@ -47,6 +49,10 @@ static bool te_is_function(const cbm_ti_node_t *n) {
  * definition starts on the line of its TEST(...) / SUITE(...) — graphs name
  * them differently (`x` without configured declarations, `TEST_x` with) —
  * else every function named `name`. *count of them, ids appended. */
+static bool te_named_match(const cbm_ti_node_t *n, int pass, int line, const char *name) {
+    return te_is_function(n) && (pass == 0 ? n->start_line == line : strcmp(n->name, name) == 0);
+}
+
 static bool te_named(te_ctx_t *c, const char *file, const char *name, int line, te_ids_t *out,
                      int *count) {
     bool ok = true;
@@ -59,10 +65,17 @@ static bool te_named(te_ctx_t *c, const char *file, const char *name, int line, 
     *count = 0;
     for (int pass = 0; pass < 2 && *count == 0; pass++) {
         for (int i = 0; i < n; i++) {
-            bool match =
-                te_is_function(&nodes[i]) &&
-                (pass == 0 ? nodes[i].start_line == line : strcmp(nodes[i].name, name) == 0);
-            if (!match) {
+            /* Any span of a definition names it by its start line, the
+             * primary one or a variant (graph_buffer.c "Definition
+             * variants"); each definition counts once. */
+            if (!te_named_match(&nodes[i], pass, line, name)) {
+                continue;
+            }
+            bool counted = false;
+            for (int k = 0; k < i && !counted; k++) {
+                counted = nodes[k].id == nodes[i].id && te_named_match(&nodes[k], pass, line, name);
+            }
+            if (counted) {
                 continue;
             }
             (*count)++;
@@ -239,7 +252,7 @@ static bool te_runner_sinks(te_ctx_t *c, te_sinks_t *s) {
                    false;
         }
         for (int k = 0; k < count; k++) {
-            if (!te_is_function(&nodes[k])) {
+            if (!te_is_function(&nodes[k]) || nodes[k].variant_span) {
                 continue;
             }
             bool main_fn = strcmp(nodes[k].name, "main") == 0;
@@ -440,7 +453,7 @@ static bool te_gap_seeds(te_ctx_t *c, const te_gap_t *g, te_ids_t *out) {
     int n = 0;
     const cbm_ti_node_t *nodes = ok ? cbm_ti_graph_file(c->graph, g->file, &n, &ok) : NULL;
     for (int i = 0; ok && i < n; i++) {
-        ok = te_ids_push(c, out, nodes[i].id);
+        ok = nodes[i].variant_span || te_ids_push(c, out, nodes[i].id);
     }
     return ok || te_fallback(c, CBM_TEST_RESULT_FALLBACK_GRAPH_UNAVAILABLE, "graph read failed");
 }
@@ -519,7 +532,9 @@ static bool te_reach_rows(te_ctx_t *c, cbm_impact_walk_t *walk, const bool *fixt
     int changed_n = 0;
     const int *changed = cbm_ti_seeds_changed_cases(c->seeds, &changed_n);
     c->reach = cbm_arena_calloc(&c->arena, (size_t)(n ? n : 1) * sizeof(*c->reach));
-    if (!c->reach) {
+    /* The graph node each row's name mapped to (0 = none or several). */
+    int64_t *row_id = cbm_arena_calloc(&c->arena, (size_t)(n ? n : 1) * sizeof(*row_id));
+    if (!c->reach || !row_id) {
         return te_oom(c);
     }
     for (int i = 0; i < n; i++) {
@@ -540,6 +555,7 @@ static bool te_reach_rows(te_ctx_t *c, cbm_impact_walk_t *walk, const bool *fixt
         for (int k = 0; k < ids.count; k++) {
             reached = reached || cbm_impact_walk_reached(walk, ids.items[k]);
         }
+        int64_t id = count == 1 && ids.count == 1 ? ids.items[0] : 0;
         cbm_free(CBM_MEM_CLASS_EXTRACT, ids.items);
         bool was_changed = fixture_cases[i];
         for (int k = 0; k < changed_n; k++) {
@@ -553,12 +569,18 @@ static bool te_reach_rows(te_ctx_t *c, cbm_impact_walk_t *walk, const bool *fixt
             continue;
         }
         if (at >= 0) {
-            /* the same name twice in one file: ambiguous, never narrowed */
-            c->reach[at].mapped = false;
+            /* The same name twice in one file is ambiguous and never narrowed,
+             * unless both are the same graph node: one test written once per
+             * #if/#elif branch is one definition with variants (graph_buffer.c
+             * "Definition variants"), as the graph already counts it. */
+            if (id == 0 || row_id[at] != id) {
+                c->reach[at].mapped = false;
+            }
             c->reach[at].reached = c->reach[at].reached || reached;
             c->reach[at].changed = c->reach[at].changed || was_changed;
             continue;
         }
+        row_id[c->reach_count] = id;
         c->reach[c->reach_count++] = (cbm_test_reach_t){.file = cases[i].file,
                                                         .test = cases[i].name,
                                                         .mapped = count == 1,
@@ -666,6 +688,52 @@ static bool te_header_triggers(te_ctx_t *c) {
     return true;
 }
 
+/* ── Spawned processes (src/pipeline/pass_spawns.c) ─────────────────
+ * A test that starts a program runs code no CALLS edge leads to: the program
+ * runs its main, and main reaches everything. The graph does not resolve
+ * which program a Process node is, so when the walk reaches a `main` outside
+ * the tests (the product's entry), every Process node joins the walk as a
+ * further seed, and SPAWNS, walked from the process to whoever starts it,
+ * carries the reach to the tests that spawn. More, never fewer. */
+static bool te_spawn_lift(te_ctx_t *c, cbm_impact_walk_t *walk) {
+    cbm_node_t *mains = NULL;
+    int main_count = 0;
+    if (cbm_store_find_nodes_by_name(c->store, "test-impact", "main", &mains, &main_count) !=
+        CBM_STORE_OK) {
+        return te_fallback(c, CBM_TEST_RESULT_FALLBACK_GRAPH_UNAVAILABLE, "graph read failed") &&
+               false;
+    }
+    bool product_main = false;
+    for (int i = 0; i < main_count && !product_main; i++) {
+        product_main = mains[i].label && strcmp(mains[i].label, "Function") == 0 &&
+                       mains[i].file_path && !te_test_file(c, mains[i].file_path) &&
+                       cbm_impact_walk_reached(walk, mains[i].id);
+    }
+    cbm_store_free_nodes(mains, main_count);
+    if (!product_main) {
+        return true;
+    }
+    cbm_node_t *processes = NULL;
+    int process_count = 0;
+    if (cbm_store_find_nodes_by_label(c->store, "test-impact", "Process", &processes,
+                                      &process_count) != CBM_STORE_OK) {
+        return te_fallback(c, CBM_TEST_RESULT_FALLBACK_GRAPH_UNAVAILABLE, "graph read failed") &&
+               false;
+    }
+    te_ids_t seeds = {0};
+    bool ok = true;
+    for (int i = 0; ok && i < process_count; i++) {
+        ok = te_ids_push(c, &seeds, processes[i].id);
+    }
+    cbm_store_free_nodes(processes, process_count);
+    if (ok && seeds.count && cbm_impact_walk_run(walk, seeds.items, seeds.count) != CBM_STORE_OK) {
+        ok = te_fallback(c, CBM_TEST_RESULT_FALLBACK_ENGINE_SATURATED, "the impact walk failed") &&
+             false;
+    }
+    cbm_free(CBM_MEM_CLASS_EXTRACT, seeds.items);
+    return ok;
+}
+
 bool te_reach(te_ctx_t *c) {
     int64_t *extra = NULL;
     int extra_count = 0;
@@ -683,6 +751,9 @@ bool te_reach(te_ctx_t *c) {
             }
         }
     }
+    /* After the runner check: the runner re-executing itself is a spawn too,
+     * and reaching its main through that is no change to the runner. */
+    ok = ok && te_spawn_lift(c, walk);
     ok = ok && te_reach_rows(c, walk, fixture_cases) && te_suite_triggers(c, walk) &&
          te_rule_triggers(c) && te_header_triggers(c);
     c->static_complete = ok;

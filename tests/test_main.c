@@ -12,22 +12,22 @@ int tf_deselected_count = 0;
 #include "test_framework.h"
 #include "test_helpers.h"
 #include "test_daemon_runtime_contract.h"
-#include "foundation/compat.h"     /* cbm_setenv — #845 supervisor kill switch */
-#include "foundation/compat_fs.h"  /* cbm_fopen — worker response file */
-#include "foundation/constants.h"  /* CBM_SZ_4K — forced stderr buffer */
-#include "foundation/log.h"        /* crash-durable worker log probe */
-#include "foundation/mem.h"        /* cbm_mem_init — worker budget */
-#include "foundation/log.h"        /* worker liveness heartbeat probe */
-#include "foundation/platform.h"   /* cbm_file_exists — blocking-git marker */
+#include "foundation/compat.h"         /* cbm_setenv — #845 supervisor kill switch */
+#include "foundation/compat_fs.h"      /* cbm_fopen — worker response file */
+#include "foundation/constants.h"      /* CBM_SZ_4K — forced stderr buffer */
+#include "foundation/log.h"            /* crash-durable worker log probe */
+#include "foundation/mem.h"            /* cbm_mem_init — worker budget */
+#include "foundation/log.h"            /* worker liveness heartbeat probe */
+#include "foundation/platform.h"       /* cbm_file_exists — blocking-git marker */
 #include "foundation/test_selection.h" /* shared executable selection token bound */
-#include "daemon/bootstrap.h"      /* runner rendezvous isolation */
-#include "daemon/runtime.h"        /* bounded worker response probe */
-#include "daemon/ipc.h"            /* Windows private-lock re-exec probe */
-#include "daemon/version_cohort.h" /* Windows crash-turnover re-exec probe */
-#include "mcp/index_supervisor.h"  /* cbm_index_set_worker_role */
-#include "mcp/mcp.h"               /* cbm_mcp_handle_tool — act as a real worker */
-#include "ui/http_server.h"        /* deleted-self executable probe */
-#include "result_spill.h"          /* pinned free disk: spill verdicts ignore the host disk */
+#include "daemon/bootstrap.h"          /* runner rendezvous isolation */
+#include "daemon/runtime.h"            /* bounded worker response probe */
+#include "daemon/ipc.h"                /* Windows private-lock re-exec probe */
+#include "daemon/version_cohort.h"     /* Windows crash-turnover re-exec probe */
+#include "mcp/index_supervisor.h"      /* cbm_index_set_worker_role */
+#include "mcp/mcp.h"                   /* cbm_mcp_handle_tool — act as a real worker */
+#include "ui/http_server.h"            /* deleted-self executable probe */
+#include "result_spill.h"              /* pinned free disk: spill verdicts ignore the host disk */
 #include <sqlite3.h>
 #include <ctype.h>
 #include <errno.h>
@@ -49,11 +49,11 @@ int tf_deselected_count = 0;
 #include <sys/mman.h>
 #endif
 #ifdef CBM_TEST_COVERAGE
-#include <dlfcn.h>   /* the libc functions behind the profile-keeping ones */
-#include <fcntl.h>   /* the marker of a forked child */
-#include <poll.h>    /* non-consuming child-failure observation */
-#include <pthread.h> /* pthread_atfork: a forked child names its own profile */
-#include <stdarg.h>  /* execl */
+#include <dlfcn.h>    /* the libc functions behind the profile-keeping ones */
+#include <fcntl.h>    /* the marker of a forked child */
+#include <poll.h>     /* non-consuming child-failure observation */
+#include <pthread.h>  /* pthread_atfork: a forked child names its own profile */
+#include <stdarg.h>   /* execl */
 #include <sys/stat.h> /* reject detectable failure-channel descriptor replacement */
 #endif
 #endif
@@ -1853,6 +1853,8 @@ extern void suite_security(void);
 extern void suite_yaml(void);
 extern void suite_integration(void);
 extern void suite_lang_contract(void);
+extern void suite_conditional_variants(void);
+extern void suite_spawns(void);
 extern void suite_edge_imports(void);
 extern void suite_edge_structural(void);
 extern void suite_lsp_resolution_probe(void);
@@ -2312,6 +2314,8 @@ int main(int argc, char **argv) {
 
     /* Per-language graph contracts (node/edge types, attribution, no-crash) */
     RUN_SELECTED_SUITE(lang_contract);
+    RUN_SELECTED_SUITE(conditional_variants);
+    RUN_SELECTED_SUITE(spawns);
     RUN_SELECTED_SUITE(edge_imports);
     RUN_SELECTED_SUITE(edge_structural);
     RUN_SELECTED_SUITE(lsp_resolution_probe);

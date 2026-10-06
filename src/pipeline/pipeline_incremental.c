@@ -1254,12 +1254,52 @@ static bool incr_label_is_registry_symbol(const char *label) {
  * project's definition symbols so the resolver can match cross-file symbols
  * during incremental. Mirrors the full-index registry contents exactly so an
  * incremental re-resolve picks the same nodes a full reindex would. */
+/* Each symbol is seeded with its file's DETECTED language, exactly what the
+ * full index recorded (pass_definitions.c / pass_parallel.c), so the cross-
+ * language veto judges an incremental re-resolve the same way. Stored nodes carry no
+ * language, so it comes from the current discovery (rel_path -> language);
+ * synthetic LSP sources (<python-builtins>) map by their fixed path, which is
+ * also why a builtin stub that outlives the last .py file stays Python. */
+typedef struct {
+    cbm_registry_t *registry;
+    CBMHashTable *lang_by_path; /* rel_path -> (CBMLanguage + 1); keys borrowed */
+} registry_seed_t;
+
 static void registry_visitor(const cbm_gbuf_node_t *node, void *userdata) {
-    cbm_registry_t *r = (cbm_registry_t *)userdata;
+    registry_seed_t *seed = (registry_seed_t *)userdata;
     if (!incr_label_is_registry_symbol(node->label)) {
         return;
     }
-    cbm_registry_add(r, node->name, node->qualified_name, node->label);
+    CBMLanguage lang = cbm_registry_synthetic_path_language(node->file_path);
+    if (lang == CBM_LANG_COUNT && seed->lang_by_path && node->file_path) {
+        void *v = cbm_ht_get(seed->lang_by_path, node->file_path);
+        if (v) {
+            lang = (CBMLanguage)((uintptr_t)v - SKIP_ONE);
+        }
+    }
+    cbm_registry_add_lang(seed->registry, node->name, node->qualified_name, node->label, lang);
+}
+
+/* Seed the registry from every registry symbol in the graph buffer, with
+ * languages taken from the discovered files (see registry_visitor). */
+static void registry_seed_from_gbuf(cbm_registry_t *registry, const cbm_gbuf_t *gbuf,
+                                    const cbm_file_info_t *files, int file_count) {
+    registry_seed_t seed = {.registry = registry, .lang_by_path = NULL};
+    if (files && file_count > 0) {
+        seed.lang_by_path = cbm_ht_create((size_t)file_count * PAIR_LEN);
+    }
+    if (seed.lang_by_path) {
+        for (int i = 0; i < file_count; i++) {
+            if (files[i].rel_path) {
+                cbm_ht_set(seed.lang_by_path, files[i].rel_path,
+                           (void *)((uintptr_t)files[i].language + SKIP_ONE));
+            }
+        }
+    }
+    cbm_gbuf_foreach_node(gbuf, registry_visitor, &seed);
+    if (seed.lang_by_path) {
+        cbm_ht_free(seed.lang_by_path);
+    }
 }
 
 static void free_incremental_result_cache(CBMFileResult **cache, int count) {
@@ -1294,6 +1334,9 @@ enum {
      * always worth attempting; the percentage governs at scale, where it is
      * the honest signal that a rebuild costs less than a repair. */
     CLOSURE_BUDGET_FLOOR_FILES = 8,
+    /* Variant partners of partners: real chains are one step (a header and
+     * its source, a set of platform files); a longer one declines. */
+    CLOSURE_VARIANT_ROUNDS_MAX = 8,
 };
 
 typedef struct {
@@ -1975,6 +2018,84 @@ static void closure_seed_governed(CBMHashTable *closure_set, const cbm_file_info
     }
 }
 
+static bool closure_path_listed(char **paths, int count, const char *path) {
+    for (int i = 0; i < count; i++) {
+        if (strcmp(paths[i], path) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Variant partners (graph_buffer.c "Definition variants"): a definition
+ * written in several files (platform files, a struct's header declaration
+ * and its source definition, Go build-tagged files) is ONE node whose
+ * file_path names one of them, with a DEFINES edge from every file that
+ * writes a variant. Re-parsing one of those files alone rebuilds the node
+ * without the others' spans and outbound edges, or leaves a changed
+ * partner's stale span behind; so every file of such a node joins the
+ * closure, to a fixpoint. `paths` is the delta (changed, then deleted from
+ * index n_changed on); `dependents` already joined. A deleted partner is in
+ * the delta already; any other partner outside the discovery declines, as a
+ * dependent would. Returns the decline reason, or NULL. */
+static const char *closure_add_variant_partners(cbm_store_t *store, const char *project,
+                                                CBMHashTable *closure_set,
+                                                CBMHashTable *files_by_path, char **paths,
+                                                int path_count, int n_changed, char **dependents,
+                                                int dependent_count) {
+    int cap = path_count + dependent_count + CBM_SZ_64;
+    const char **pending = cbm_alloc(CBM_MEM_CLASS_OTHER, (size_t)cap * sizeof(char *));
+    if (!pending) {
+        return "alloc";
+    }
+    int n = 0;
+    for (int i = 0; i < path_count; i++) {
+        pending[n++] = paths[i];
+    }
+    for (int i = 0; i < dependent_count; i++) {
+        pending[n++] = dependents[i];
+    }
+    const char *decline = NULL;
+    for (int round = 0; n > 0 && !decline; round++) {
+        char **partners = NULL;
+        int pc = 0;
+        if (round == CLOSURE_VARIANT_ROUNDS_MAX) {
+            decline = "variant_partner_rounds";
+        } else if (cbm_store_get_variant_partner_files(store, project, pending, n, &partners,
+                                                       &pc) != CBM_STORE_OK) {
+            decline = "variant_partner_query_failed";
+        }
+        n = 0;
+        for (int i = 0; i < pc && !decline; i++) {
+            const cbm_file_info_t *fi = cbm_ht_get(files_by_path, partners[i]);
+            if (!fi) {
+                if (!closure_path_listed(paths + n_changed, path_count - n_changed, partners[i])) {
+                    decline = "variant_partner_not_discovered";
+                }
+                continue;
+            }
+            if (cbm_ht_get(closure_set, fi->rel_path)) {
+                continue;
+            }
+            cbm_ht_set(closure_set, fi->rel_path, (void *)fi->rel_path);
+            if (n == cap) {
+                cap *= PAIR_LEN;
+                const char **grown =
+                    cbm_realloc(CBM_MEM_CLASS_OTHER, pending, (size_t)cap * sizeof(char *));
+                if (!grown) {
+                    decline = "alloc";
+                    break;
+                }
+                pending = grown;
+            }
+            pending[n++] = fi->rel_path;
+        }
+        cbm_store_free_dependent_files(partners, pc);
+    }
+    cbm_free(CBM_MEM_CLASS_OTHER, pending);
+    return decline;
+}
+
 /* Decide whether this manifest delta is closure-repairable, and if so build
  * the plan. Returns 1 with *plan filled, or 0 (decline → FULL) with the
  * reason logged. Every early exit declines; nothing here mutates state. */
@@ -2194,6 +2315,12 @@ static int closure_try_plan(cbm_pipeline_t *p, cbm_store_t *store, const char *p
             cbm_ht_set(closure_set, dependents[i], dependents[i]);
         }
     }
+    decline =
+        closure_add_variant_partners(store, project, closure_set, files_by_path, changed_paths,
+                                     n_changed + n_deleted, n_changed, dependents, dependent_count);
+    if (decline) {
+        goto done;
+    }
     /* closure_count == 0 is legitimate: a deleted-only delta with no
      * dependents has nothing to re-parse, but the purge itself still needs
      * the executor. */
@@ -2265,7 +2392,8 @@ static int run_closure_delta(cbm_pipeline_t *p, const char *db_path, const char 
                              closure_plan_t *plan, cbm_file_info_t *changed_files, int ci,
                              char **deleted, int deleted_count, cbm_file_hash_t *mode_skipped,
                              int mode_skipped_count, cbm_coverage_row_t *old_cov, int old_cov_count,
-                             cbm_store_t *route_store, struct timespec t0) {
+                             cbm_store_t *route_store, const cbm_file_info_t *files, int file_count,
+                             struct timespec t0) {
     struct timespec t;
     cbm_store_close(route_store);
 
@@ -2335,7 +2463,7 @@ static int run_closure_delta(cbm_pipeline_t *p, const char *db_path, const char 
     if (!registry) {
         goto out;
     }
-    cbm_gbuf_foreach_node(gbuf, registry_visitor, registry);
+    registry_seed_from_gbuf(registry, gbuf, files, file_count);
     cbm_log_info("delta.preseed_done", "registry", itoa_buf(cbm_registry_size(registry)),
                  "elapsed_ms", itoa_buf((int)elapsed_ms(t)));
 
@@ -2928,7 +3056,7 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
         return run_closure_delta(p, db_path, project, baseline_manifest, baseline_count,
                                  &closure_plan, changed_files, ci, deleted, deleted_count,
                                  mode_skipped, mode_skipped_count, old_cov, old_cov_count, store,
-                                 t0);
+                                 files, file_count, t0);
     }
 
     struct timespec t;
@@ -3035,7 +3163,7 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
     /* Step 3-5: Registry + extract + resolve */
     cbm_registry_t *registry = cbm_registry_new();
     cbm_clock_gettime(CLOCK_MONOTONIC, &t);
-    cbm_gbuf_foreach_node(existing, registry_visitor, registry);
+    registry_seed_from_gbuf(registry, existing, files, file_count);
     cbm_log_info("incremental.registry_seed", "symbols", itoa_buf(cbm_registry_size(registry)),
                  "elapsed_ms", itoa_buf((int)elapsed_ms(t)));
 

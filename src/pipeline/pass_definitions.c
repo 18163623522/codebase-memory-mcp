@@ -381,7 +381,7 @@ static void pd_add_file_doc(const cbm_gbuf_node_t *file_node, const char *doc) {
  * `file_doc`, the file's own doc (passed with its first def only), goes on the
  * File node. */
 static void process_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def, const char *rel,
-                        const char *file_doc) {
+                        const char *file_doc, CBMLanguage lang) {
     if (!def->qualified_name || !def->name) {
         return;
     }
@@ -401,7 +401,7 @@ static void process_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def, const
      * (SQL FROM/JOIN lineage). pass_parallel.c and pipeline_incremental.c seed
      * through the same predicate, so the three registries cannot diverge. */
     if (node_id > 0 && cbm_label_is_registry_symbol(def->label)) {
-        cbm_registry_add(ctx->registry, def->name, def->qualified_name, def->label);
+        cbm_registry_add_lang(ctx->registry, def->name, def->qualified_name, def->label, lang);
     }
     char *file_qn = cbm_pipeline_fqn_compute(ctx->project_name, rel, "__file__");
     const cbm_gbuf_node_t *file_node = cbm_gbuf_find_by_qn(ctx->gbuf, file_qn);
@@ -956,7 +956,7 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
         /* Create nodes for each definition */
         const char *file_doc = result->module_doc; /* goes with the first def */
         for (int d = 0; d < result->defs.count; d++) {
-            process_def(ctx, &result->defs.items[d], rel, file_doc);
+            process_def(ctx, &result->defs.items[d], rel, file_doc, lang);
             file_doc = NULL;
             total_defs++;
         }

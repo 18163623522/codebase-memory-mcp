@@ -17,6 +17,7 @@
 #include "discover/test_conventions.h"
 #include "git/git_context.h"
 #include "foundation/hash_table.h"
+#include "spawn_patterns.h"
 #include "cbm.h"
 #include "lsp/go_lsp.h" /* CBMLSPDef for cbm_parallel_resolve cross-LSP inputs */
 #include <stdatomic.h>
@@ -571,6 +572,29 @@ bool cbm_pipeline_http_client_call_url(const cbm_gbuf_t *gbuf, const char *proje
                                        const CBMFileResult *result, const char **imp_keys,
                                        const char **imp_vals, int imp_count, const CBMCall *call,
                                        char *out, size_t out_sz);
+
+/* A spawn site (pass_spawns.c): the API the call names and the program it
+ * starts (CBM_SPAWN_DYNAMIC when not a literal). */
+typedef struct {
+    const char *api;
+    char program[CBM_SPAWN_PROGRAM_MAX];
+} cbm_pipeline_spawn_t;
+
+/* True when `call` starts another program (spawn_patterns.h) and `res`, the
+ * registry answer after the cross-language veto, does not make it a call into
+ * the project's own code. `imports` are the file's extracted imports, not the
+ * resolver's import map: that one holds only imports that resolved to project
+ * nodes, and subprocess or os/exec never do. Both call resolvers ask at the
+ * same point and, on true, emit cbm_pipeline_emit_spawn INSTEAD of a CALLS
+ * edge. */
+bool cbm_pipeline_spawn_site(const cbm_gbuf_t *gbuf, CBMLanguage lang, const CBMCall *call,
+                             const CBMImportArray *imports, const cbm_resolution_t *res,
+                             cbm_pipeline_spawn_t *out);
+
+/* The Process node of the spawned program (QN __process__<program>, one per
+ * program) and the SPAWNS edge from `source` to it. */
+void cbm_pipeline_emit_spawn(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source, const CBMCall *call,
+                             const cbm_pipeline_spawn_t *spawn);
 
 /* Resolve an import to its in-graph target node, or NULL if unresolvable.
  *

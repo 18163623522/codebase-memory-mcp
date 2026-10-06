@@ -1999,6 +1999,231 @@ TEST(pipeline_objectscript_export_incremental_matches_full_relationships) {
     PASS();
 }
 
+/* Cross-language unique_name leak. Every Python file injects a few builtin
+ * stub definitions (builtins.dict.get, builtins.len, ...; see
+ * internal/cbm/lsp/py_builtins.c) into the project registry. A JS Express
+ * registration `app.get('/users', listUsers)` has no LSP target, falls
+ * through to the registry, and its short name "get" had exactly one
+ * candidate project-wide: Python's builtins.dict.get (strategy unique_name).
+ * The non-empty resolution skipped the route-registration fallback (it runs
+ * only on an EMPTY resolution), and the weak-member guard then dropped the
+ * plain CALLS edge, so the Route node and its HANDLES edge vanished -- on the
+ * sequential and the parallel path alike, and on an incremental reindex whose
+ * registry is re-seeded from stored nodes (the builtin stubs survive there
+ * even after the last .py file is gone).
+ *
+ * The same leak fabricates CALLS edges on both paths: a bare JS `print(msg)`
+ * bound to Python's builtins.print by unique_name. `cache.get(key)` guards the
+ * other side of the veto: an unresolved route verb without a route path must
+ * not become a CALLS self-loop on the parallel path.
+ *
+ * The Python control proves the builtins stay reachable from Python itself:
+ * lookup() -> builtins.dict.get (lsp_generic_method) and -> builtins.len. */
+typedef struct {
+    int run_rc;
+    bool store_opened;
+    int routes;      /* Route node "/users" */
+    int handles;     /* listUsers -[HANDLES]-> "/users" */
+    int py_dict_get; /* lookup -[CALLS]-> get */
+    int py_len;      /* lookup -[CALLS]-> len */
+    int js_print;    /* report -[CALLS]-> print (JS global, never Python's) */
+    int self_loop;   /* readCache -[CALLS]-> readCache (unresolved route verb) */
+} XlangRouteObservation;
+
+static XlangRouteObservation observe_xlang_route(const char *repo_path, const char *db_name) {
+    XlangRouteObservation o = {.run_rc = -1,
+                               .routes = -1,
+                               .handles = -1,
+                               .py_dict_get = -1,
+                               .py_len = -1,
+                               .js_print = -1,
+                               .self_loop = -1};
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/%s", repo_path, db_name);
+    cbm_pipeline_t *pipeline = cbm_pipeline_new(repo_path, db_path, CBM_MODE_FULL);
+    if (!pipeline) {
+        return o;
+    }
+    o.run_rc = cbm_pipeline_run(pipeline);
+    const char *project = cbm_pipeline_project_name(pipeline);
+    cbm_store_t *store = cbm_store_open_path(db_path);
+    o.store_opened = store != NULL;
+    if (store && project) {
+        o.routes = named_node_count(store, project, "/users");
+        o.handles = named_edge_count(store, project, "HANDLES", "listUsers", "/users");
+        o.py_dict_get = named_edge_count(store, project, "CALLS", "lookup", "get");
+        o.py_len = named_edge_count(store, project, "CALLS", "lookup", "len");
+        o.js_print = named_edge_count(store, project, "CALLS", "report", "print");
+        o.self_loop = named_edge_count(store, project, "CALLS", "readCache", "readCache");
+    }
+    if (store) {
+        cbm_store_close(store);
+    }
+    cbm_pipeline_free(pipeline);
+    return o;
+}
+
+static const char XLANG_APP_JS[] = "const express = require('express');\n"
+                                   "const app = express();\n"
+                                   "\n"
+                                   "function listUsers(req, res) {\n"
+                                   "  res.json([]);\n"
+                                   "}\n"
+                                   "\n"
+                                   "app.get('/users', listUsers);\n"
+                                   "\n"
+                                   "function report(msg) {\n"
+                                   "  print(msg);\n"
+                                   "}\n"
+                                   "\n"
+                                   "function readCache(cache, key) {\n"
+                                   "  return cache.get(key);\n"
+                                   "}\n"
+                                   "module.exports = { app, report, readCache };\n";
+
+static const char XLANG_TOOL_PY[] = "def lookup(xs):\n"
+                                    "    d = {\"k\": 1}\n"
+                                    "    n = len(xs)\n"
+                                    "    return d.get(\"k\"), n\n";
+
+/* Writes app.js + tool.py + `pad` JS filler files (the fillers only select the
+ * parallel path: more than MIN_FILES_FOR_PARALLEL files). 0 on success. */
+static int write_xlang_route_fixture(const char *dir, int pad) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/app.js", dir);
+    if (th_write_file(path, XLANG_APP_JS) != 0) {
+        return -1;
+    }
+    snprintf(path, sizeof(path), "%s/tool.py", dir);
+    if (th_write_file(path, XLANG_TOOL_PY) != 0) {
+        return -1;
+    }
+    for (int i = 0; i < pad; i++) {
+        char source[128];
+        snprintf(path, sizeof(path), "%s/xlang_pad_%02d.js", dir, i);
+        snprintf(source, sizeof(source), "function xlangPad%02d() { return %d; }\n", i, i);
+        if (th_write_file(path, source) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* Saves and overrides the two worker-selection variables. */
+typedef struct {
+    char *workers;
+    char *single;
+} XlangEnvSave;
+
+static XlangEnvSave xlang_env_select(bool parallel) {
+    XlangEnvSave save = {0};
+    const char *w = getenv("CBM_WORKERS");
+    const char *s = getenv("CBM_INDEX_SINGLE_THREAD");
+    save.workers = w ? strdup(w) : NULL;
+    save.single = s ? strdup(s) : NULL;
+    if (parallel) {
+        cbm_unsetenv("CBM_INDEX_SINGLE_THREAD");
+        cbm_setenv("CBM_WORKERS", "4", 1);
+    } else {
+        cbm_setenv("CBM_INDEX_SINGLE_THREAD", "1", 1);
+    }
+    return save;
+}
+
+static void xlang_env_restore(XlangEnvSave *save) {
+    if (save->workers) {
+        cbm_setenv("CBM_WORKERS", save->workers, 1);
+        free(save->workers);
+    } else {
+        cbm_unsetenv("CBM_WORKERS");
+    }
+    if (save->single) {
+        cbm_setenv("CBM_INDEX_SINGLE_THREAD", save->single, 1);
+        free(save->single);
+    } else {
+        cbm_unsetenv("CBM_INDEX_SINGLE_THREAD");
+    }
+    save->workers = NULL;
+    save->single = NULL;
+}
+
+static XlangRouteObservation run_xlang_route_case(bool parallel, int pad) {
+    XlangRouteObservation o = {.run_rc = -1};
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_xlang_route_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        return o;
+    }
+    if (write_xlang_route_fixture(tmp, pad) == 0) {
+        XlangEnvSave save = xlang_env_select(parallel);
+        o = observe_xlang_route(tmp, "xlang.db");
+        xlang_env_restore(&save);
+    }
+    th_rmtree(tmp);
+    return o;
+}
+
+TEST(pipeline_js_route_not_bound_to_python_builtin_sequential) {
+    XlangRouteObservation o = run_xlang_route_case(false, 0);
+    ASSERT_EQ(o.run_rc, 0);
+    ASSERT_TRUE(o.store_opened);
+    ASSERT_EQ(o.routes, 1);
+    ASSERT_EQ(o.handles, 1);
+    ASSERT_EQ(o.py_dict_get, 1);
+    ASSERT_EQ(o.py_len, 1);
+    ASSERT_EQ(o.js_print, 0);
+    ASSERT_EQ(o.self_loop, 0);
+    PASS();
+}
+
+TEST(pipeline_js_route_not_bound_to_python_builtin_parallel) {
+    XlangRouteObservation o = run_xlang_route_case(true, 55);
+    ASSERT_EQ(o.run_rc, 0);
+    ASSERT_TRUE(o.store_opened);
+    ASSERT_EQ(o.routes, 1);
+    ASSERT_EQ(o.handles, 1);
+    ASSERT_EQ(o.py_dict_get, 1);
+    ASSERT_EQ(o.py_len, 1);
+    ASSERT_EQ(o.js_print, 0);
+    ASSERT_EQ(o.self_loop, 0);
+    PASS();
+}
+
+/* Incremental: the registry is re-seeded from stored nodes, where the Python
+ * builtin stubs outlive the last .py file (their file_path is synthetic). */
+TEST(pipeline_js_route_not_bound_to_python_builtin_incremental) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_xlang_incr_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    if (write_xlang_route_fixture(tmp, 0) != 0) {
+        th_rmtree(tmp);
+        FAIL("fixture");
+    }
+    XlangEnvSave save = xlang_env_select(false);
+    XlangRouteObservation initial = observe_xlang_route(tmp, "xlang-incr.db");
+    char path[512];
+    snprintf(path, sizeof(path), "%s/tool.py", tmp);
+    int rm_rc = remove(path);
+    snprintf(path, sizeof(path), "%s/app.js", tmp);
+    int append_rc = th_append_file(path, "// edited: re-resolve this file\n");
+    XlangRouteObservation incremental = observe_xlang_route(tmp, "xlang-incr.db");
+    xlang_env_restore(&save);
+    th_rmtree(tmp);
+
+    ASSERT_EQ(rm_rc, 0);
+    ASSERT_EQ(append_rc, 0);
+    ASSERT_EQ(initial.run_rc, 0);
+    ASSERT_EQ(incremental.run_rc, 0);
+    ASSERT_TRUE(incremental.store_opened);
+    ASSERT_EQ(incremental.routes, 1);
+    ASSERT_EQ(incremental.handles, 1);
+    ASSERT_EQ(incremental.js_print, 0);
+    ASSERT_EQ(incremental.self_loop, 0);
+    PASS();
+}
+
 static bool test_buffer_appendf(char *buffer, size_t capacity, size_t *used, const char *format,
                                 ...) {
     if (!buffer || !used || *used >= capacity) {
@@ -18151,6 +18376,9 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_incremental_preserves_cross_file_calls);
     RUN_TEST(pipeline_objectscript_export_preserves_calls_sequential_parallel);
     RUN_TEST(pipeline_objectscript_export_incremental_matches_full_relationships);
+    RUN_TEST(pipeline_js_route_not_bound_to_python_builtin_sequential);
+    RUN_TEST(pipeline_js_route_not_bound_to_python_builtin_parallel);
+    RUN_TEST(pipeline_js_route_not_bound_to_python_builtin_incremental);
     RUN_TEST(pipeline_objectscript_export_aggregate_exceeds_arena_block_table);
 #if defined(CBM_COVERAGE_MARKER_TEST_API) && CBM_COVERAGE_MARKER_TEST_API
     RUN_TEST(pipeline_objectscript_export_range_join_keeps_one_trailing_marker);

@@ -4721,6 +4721,42 @@ static char *store_like_dot_suffix(const char *text, const char *tail) {
     return pat;
 }
 
+int cbm_store_find_variant_spans_by_file(cbm_store_t *s, const char *project, const char *file_path,
+                                         cbm_node_t **out, int *count) {
+    *out = NULL;
+    *count = 0;
+    if (!s || !s->db || !project || !file_path) {
+        return CBM_STORE_ERR;
+    }
+    /* The file's own nodes with variants (idx_nodes_file), and the nodes of
+     * other files it writes a variant of (its File/Module DEFINES edges);
+     * then each one's variant spans that lie in this file. */
+    const char *sql =
+        "SELECT n.id, n.project, n.label, n.name, n.qualified_name, n.file_path,"
+        " CAST(json_extract(v.value, '$.start_line') AS INTEGER),"
+        " CAST(json_extract(v.value, '$.end_line') AS INTEGER), n.properties"
+        " FROM nodes n, json_each(n.properties, '$.variants') v"
+        " WHERE n.id IN ("
+        "  SELECT id FROM nodes WHERE project = ?1 AND file_path = ?2"
+        "   AND json_array_length(properties, '$.variants') > 1"
+        "  UNION SELECT tgt.id FROM nodes src"
+        "   CROSS JOIN edges e ON e.source_id = src.id"
+        "   CROSS JOIN nodes tgt ON tgt.id = e.target_id"
+        "   WHERE src.project = ?1 AND src.file_path = ?2 AND src.label IN ('File','Module')"
+        "   AND e.type = 'DEFINES' AND tgt.file_path <> ?2"
+        "   AND json_array_length(tgt.properties, '$.variants') > 1)"
+        " AND json_extract(v.value, '$.file_path') = ?2"
+        " ORDER BY n.id, 7, 8";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s->db, sql, CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
+        store_set_error_sqlite(s, "variant spans prepare");
+        return CBM_STORE_ERR;
+    }
+    bind_text(stmt, SKIP_ONE, project);
+    bind_text(stmt, ST_COL_2, file_path);
+    return store_collect_nodes(s, stmt, NULL, NULL, out, count);
+}
+
 int cbm_store_find_nodes_by_qn_suffix(cbm_store_t *s, const char *project, const char *suffix,
                                       cbm_node_t **out, int *count) {
     *out = NULL;
@@ -5349,43 +5385,40 @@ void cbm_store_free_lsp_surfaces(cbm_lsp_surface_row_t *rows, int count) {
     free(rows);
 }
 
-/* One chunk of the dependent-file query. Binding an IN list needs one
- * placeholder per element, so the SQL is assembled per chunk; the chunk cap
+/* One chunk of a file-path query over a list of files. Binding an IN list
+ * needs one placeholder per element, so the SQL is assembled per chunk from
+ * `parts`, with the placeholder list ?2..?n+1 between consecutive parts (a
+ * query may name the list more than once); ?1 is the project. The chunk cap
  * keeps it bounded. Dedup across chunks happens in the caller's hash set. */
 enum { DEPFILE_CHUNK = 200 };
 
-static int dependent_files_chunk(cbm_store_t *s, const char *project,
-                                 const char *const *target_files, int chunk_count,
-                                 CBMHashTable *seen, char ***out, int *out_count, int *out_cap) {
-    char sql[CBM_SZ_4K];
-    int pos = snprintf(sql, sizeof(sql),
-                       /* CROSS JOIN pins nodes-first (see the delta snapshot query:
-                        * the free planner walks every project edge instead). */
-                       "SELECT DISTINCT src.file_path FROM nodes tgt"
-                       " CROSS JOIN edges e ON e.target_id = tgt.id"
-                       " CROSS JOIN nodes src ON e.source_id = src.id"
-                       " WHERE tgt.project = ?1 AND tgt.file_path IN (");
-    for (int i = 0; i < chunk_count; i++) {
-        pos += snprintf(sql + pos, sizeof(sql) - (size_t)pos, "%s?%d", i ? "," : "", i + ST_COL_2);
+static int file_query_chunk(cbm_store_t *s, const char *const *parts, int nparts, const char *what,
+                            const char *project, const char *const *target_files, int chunk_count,
+                            CBMHashTable *seen, char ***out, int *out_count, int *out_cap) {
+    char sql[CBM_SZ_8K];
+    sql[0] = '\0';
+    if (nparts < 1) {
+        return CBM_STORE_ERR;
+    }
+    int pos = 0;
+    for (int part = 0; part < nparts; part++) {
+        if (part > 0) {
+            for (int i = 0; i < chunk_count; i++) {
+                pos += snprintf(sql + pos, sizeof(sql) - (size_t)pos, "%s?%d", i ? "," : "",
+                                i + ST_COL_2);
+                if ((size_t)pos >= sizeof(sql)) {
+                    return CBM_STORE_ERR;
+                }
+            }
+        }
+        pos += snprintf(sql + pos, sizeof(sql) - (size_t)pos, "%s", parts[part]);
         if ((size_t)pos >= sizeof(sql)) {
             return CBM_STORE_ERR;
         }
     }
-    /* Structural containment is not resolution: a Folder/Project container
-     * (whose file_path is a properties placeholder, not a real file) or a
-     * CONTAINS_* edge says nothing about who consumed the target's
-     * definitions, and the closure planner would otherwise decline on a
-     * "dependent" no discovery can ever produce. */
-    pos += snprintf(sql + pos, sizeof(sql) - (size_t)pos,
-                    ") AND src.file_path <> '' AND src.file_path IS NOT NULL"
-                    " AND src.label NOT IN ('Folder','Project')"
-                    " AND e.type NOT IN ('CONTAINS_FILE','CONTAINS_FOLDER')");
-    if ((size_t)pos >= sizeof(sql)) {
-        return CBM_STORE_ERR;
-    }
     sqlite3_stmt *stmt = NULL;
     if (sqlite3_prepare_v2(s->db, sql, CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
-        store_set_error_sqlite(s, "dependent_files prepare");
+        store_set_error_sqlite(s, what);
         return CBM_STORE_ERR;
     }
     bind_text(stmt, ST_COL_1, project);
@@ -5420,16 +5453,18 @@ static int dependent_files_chunk(cbm_store_t *s, const char *project,
     return step_rc == SQLITE_DONE ? CBM_STORE_OK : CBM_STORE_ERR;
 }
 
-int cbm_store_get_dependent_files(cbm_store_t *s, const char *project,
-                                  const char *const *target_files, int target_count, char ***out,
-                                  int *out_count) {
+/* Run `parts` over every chunk of target_files; the targets themselves are
+ * excluded from the result. */
+static int file_query(cbm_store_t *s, const char *const *parts, int nparts, const char *what,
+                      const char *project, const char *const *target_files, int target_count,
+                      char ***out, int *out_count) {
     *out = NULL;
     *out_count = 0;
     if (!s || !project || target_count <= 0) {
         return target_count == 0 ? CBM_STORE_OK : CBM_STORE_ERR;
     }
     /* Exclude the targets themselves up front: an edge between two files of
-     * the closure adds nothing, and the caller wants "who ELSE consumed". */
+     * the closure adds nothing, and the caller wants "who ELSE". */
     CBMHashTable *seen = cbm_ht_create((size_t)target_count * PAIR_LEN);
     if (!seen) {
         return CBM_STORE_ERR;
@@ -5446,8 +5481,8 @@ int cbm_store_get_dependent_files(cbm_store_t *s, const char *project,
         if (chunk > DEPFILE_CHUNK) {
             chunk = DEPFILE_CHUNK;
         }
-        rc = dependent_files_chunk(s, project, target_files + off, chunk, seen, &files, &count,
-                                   &cap);
+        rc = file_query_chunk(s, parts, nparts, what, project, target_files + off, chunk, seen,
+                              &files, &count, &cap);
     }
     cbm_ht_free(seen);
     if (rc != CBM_STORE_OK) {
@@ -5457,6 +5492,54 @@ int cbm_store_get_dependent_files(cbm_store_t *s, const char *project,
     *out = files;
     *out_count = count;
     return CBM_STORE_OK;
+}
+
+int cbm_store_get_dependent_files(cbm_store_t *s, const char *project,
+                                  const char *const *target_files, int target_count, char ***out,
+                                  int *out_count) {
+    static const char *const parts[] = {
+        /* CROSS JOIN pins nodes-first (see the delta snapshot query: the
+         * free planner walks every project edge instead). */
+        "SELECT DISTINCT src.file_path FROM nodes tgt"
+        " CROSS JOIN edges e ON e.target_id = tgt.id"
+        " CROSS JOIN nodes src ON e.source_id = src.id"
+        " WHERE tgt.project = ?1 AND tgt.file_path IN (",
+        /* Structural containment is not resolution: a Folder/Project
+         * container (whose file_path is a properties placeholder, not a real
+         * file) or a CONTAINS_* edge says nothing about who consumed the
+         * target's definitions, and the closure planner would otherwise
+         * decline on a "dependent" no discovery can ever produce. */
+        ") AND src.file_path <> '' AND src.file_path IS NOT NULL"
+        " AND src.label NOT IN ('Folder','Project')"
+        " AND e.type NOT IN ('CONTAINS_FILE','CONTAINS_FOLDER')"};
+    return file_query(s, parts, 2, "dependent_files prepare", project, target_files, target_count,
+                      out, out_count);
+}
+
+int cbm_store_get_variant_partner_files(cbm_store_t *s, const char *project,
+                                        const char *const *files, int count, char ***out,
+                                        int *out_count) {
+    static const char *const parts[] = {
+        /* A file that writes a variant of a node whose file_path is
+         * another file. */
+        "SELECT tgt.file_path FROM nodes src"
+        " CROSS JOIN edges e ON e.source_id = src.id"
+        " CROSS JOIN nodes tgt ON e.target_id = tgt.id"
+        " WHERE src.project = ?1 AND src.label IN ('File','Module') AND e.type = 'DEFINES'"
+        " AND tgt.file_path <> src.file_path AND tgt.file_path <> ''"
+        " AND json_array_length(tgt.properties, '$.variants') > 1"
+        " AND src.file_path IN (",
+        /* The other files that write a variant of a node in the file. */
+        ") UNION SELECT src.file_path FROM nodes tgt"
+        " CROSS JOIN edges e ON e.target_id = tgt.id"
+        " CROSS JOIN nodes src ON e.source_id = src.id"
+        " WHERE tgt.project = ?1 AND e.type = 'DEFINES' AND src.label IN ('File','Module')"
+        " AND src.file_path <> tgt.file_path AND src.file_path <> ''"
+        " AND json_array_length(tgt.properties, '$.variants') > 1"
+        " AND tgt.file_path IN (",
+        ")"};
+    return file_query(s, parts, 3, "variant_partner_files prepare", project, files, count, out,
+                      out_count);
 }
 
 void cbm_store_free_dependent_files(char **files, int count) {

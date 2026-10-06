@@ -41,6 +41,10 @@ typedef struct {
     const char *qualified_name;
     int start_line;
     int end_line;
+    /* A further span of a definition already listed (another #if branch or
+     * platform-file variant, graph_buffer.c "Definition variants"): it maps
+     * lines to the node, but enumerating definitions counts the node once. */
+    bool variant_span;
 } cbm_ti_node_t;
 
 /* Borrows the store until free. Nodes of a file are read once, on first use. */

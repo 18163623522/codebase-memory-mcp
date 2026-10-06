@@ -686,6 +686,15 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call, const CBM
             res.confidence = lsp->confidence;
             res.strategy = lsp->strategy;
             res.candidate_count = 1;
+            /* An LSP answer on a synthetic builtin (`<python-builtins>`) is
+             * not project code: a spawn spelling still spawns. The parallel
+             * pass keeps the LSP answer in `res` and asks the same question.
+             * MUST match pass_parallel.c. */
+            cbm_pipeline_spawn_t spawn;
+            if (cbm_pipeline_spawn_site(ctx->gbuf, lang, call, imports, &res, &spawn)) {
+                cbm_pipeline_emit_spawn(ctx->gbuf, source_node, call, &spawn);
+                return SKIP_ONE;
+            }
             emit_classified_edge(ctx, call, source_node, target_node, &res, module_qn, imp_keys,
                                  imp_vals, imp_count, false, route_mount);
             return SKIP_ONE;
@@ -755,6 +764,14 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call, const CBM
     if (!rust_external) {
         res = cbm_registry_resolve(ctx->registry, call->callee_name, module_qn, imp_keys, imp_vals,
                                    imp_count);
+        /* Cross-language veto: a name-only guess never binds another
+         * language's symbol (a JS app.get must not become Python's
+         * builtins.dict.get). The vetoed answer becomes EMPTY here, before
+         * the fallbacks below, so the route/HTTP classification still runs.
+         * MUST match pass_parallel.c. */
+        if (cbm_registry_name_guess_vetoed(ctx->registry, lang, &res)) {
+            res = (cbm_resolution_t){0};
+        }
     }
     /* `p->open(fd)`: the registry does not split a callee on the arrow, and a
      * member is not a name it could resolve anyway. The object's type decides,
@@ -767,6 +784,14 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call, const CBM
                           lsp_calls, NULL, ctx->gbuf, ctx->registry, ctx->project_name,
                           call->enclosing_func_qn, call->callee_name,
                           cbm_c_member_rule_file(lang, rel), &res) != NULL;
+    }
+    /* A call that starts another program (subprocess.run, exec.Command,
+     * posix_spawn): a SPAWNS edge to its Process node instead of a CALLS
+     * edge. MUST match pass_parallel.c. */
+    cbm_pipeline_spawn_t spawn;
+    if (cbm_pipeline_spawn_site(ctx->gbuf, lang, call, imports, &res, &spawn)) {
+        cbm_pipeline_emit_spawn(ctx->gbuf, source_node, call, &spawn);
+        return SKIP_ONE;
     }
     if (!res.qualified_name || res.qualified_name[0] == '\0') {
         /* Resolution is empty when the callee belongs to an EXTERNAL client

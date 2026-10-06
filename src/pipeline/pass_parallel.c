@@ -1730,7 +1730,7 @@ int cbm_parallel_extract(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
  * once per file by the caller: computing the file QN and finding its node for
  * every definition was 700 k allocations and lookups on the Go corpus. */
 static int register_and_link_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def,
-                                 int64_t file_node_id, int *reg_entries) {
+                                 int64_t file_node_id, CBMLanguage lang, int *reg_entries) {
     int edges = 0;
     if (!def->name || !def->qualified_name || !def->label) {
         return 0;
@@ -1738,7 +1738,7 @@ static int register_and_link_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *d
     /* Registry membership is defined ONCE by cbm_label_is_registry_symbol
      * (helpers.c) — see pass_definitions.c for the per-label rationale. */
     if (cbm_label_is_registry_symbol(def->label)) {
-        cbm_registry_add(ctx->registry, def->name, def->qualified_name, def->label);
+        cbm_registry_add_lang(ctx->registry, def->name, def->qualified_name, def->label, lang);
         (*reg_entries)++;
     }
     const cbm_gbuf_node_t *def_node = cbm_gbuf_find_by_qn(ctx->gbuf, def->qualified_name);
@@ -1933,8 +1933,8 @@ int cbm_build_registry_from_cache(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
             free(file_qn);
             pp_add_file_doc(file_node, result->module_doc);
             for (int d = 0; d < result->defs.count; d++) {
-                defines_edges +=
-                    register_and_link_def(ctx, &result->defs.items[d], file_node_id, &reg_entries);
+                defines_edges += register_and_link_def(ctx, &result->defs.items[d], file_node_id,
+                                                       files[i].language, &reg_entries);
             }
         }
 
@@ -3186,6 +3186,13 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
 
         _rc_t0 = extract_now_ns();
         try_field_type_hint(rc, &res, call->callee_name, source_node->id);
+        /* Cross-language veto — the same predicate as pass_calls.c, applied
+         * AFTER the field-type hint so the hint may still re-pick a compatible
+         * candidate first, and BEFORE the empty-resolution fallbacks below so a
+         * vetoed call still reaches route/HTTP classification. */
+        if (cbm_registry_name_guess_vetoed(rc->registry, lang, &res)) {
+            res = (cbm_resolution_t){0};
+        }
         atomic_fetch_add_explicit(&rc->time_ns_rc_hint, extract_now_ns() - _rc_t0,
                                   memory_order_relaxed);
 
@@ -3281,19 +3288,29 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
             }
         }
 
+        /* A call that starts another program (subprocess.run, exec.Command,
+         * posix_spawn): a SPAWNS edge to its Process node instead of a CALLS
+         * edge. `res` holds the LSP answer when there is one, as the
+         * sequential pass asks inside its LSP branch. MUST match pass_calls.c. */
+        cbm_pipeline_spawn_t spawn;
+        if (cbm_pipeline_spawn_site(rc->main_gbuf, lang, call, &result->imports, &res, &spawn)) {
+            cbm_pipeline_emit_spawn(ws->local_edge_buf, source_node, call, &spawn);
+            continue;
+        }
+
         if (!res.qualified_name || res.qualified_name[0] == '\0') {
             if (cbm_service_pattern_route_method(call->callee_name) != NULL) {
                 cbm_resolution_t fake_res = {.qualified_name = call->callee_name,
                                              .confidence = PP_HALF_CONF,
                                              .strategy = "callee_suffix"};
-                /* #2053: an LSP-external Rust call (`map.get(k)` on a std
-                 * HashMap) reaches this branch only because its registry
-                 * fallback was skipped. Without a route path the plain-CALLS
-                 * fall-through would bind source -> source, a fabricated
-                 * self-call, so it keeps only the route/service edges. */
+                /* The target here is the SOURCE itself (nothing resolved), so
+                 * the plain-CALLS fall-through for a route-verb call without a
+                 * route path (`cache.get(key)`) would be a self-loop; that holds
+                 * for #2053's LSP-external Rust calls too. Suppress it always;
+                 * route/HTTP/service classification is unchanged. */
                 emit_service_edge(ws->local_edge_buf, source_node, source_node, call, &fake_res,
                                   module_qn, rc->registry, rc->main_gbuf, imp_keys, imp_vals,
-                                  imp_count, rust_external, route_mount);
+                                  imp_count, true, route_mount);
             } else if (cbm_service_pattern_is_global_fetch(call->callee_name)) {
                 /* Native `fetch()` (#856): only the global API once resolution
                  * has failed to find a local/imported `fetch`. Call the low-level

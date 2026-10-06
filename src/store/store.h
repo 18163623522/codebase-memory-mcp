@@ -99,6 +99,14 @@ typedef struct {
     const char *config_ctx; /* governing-config context hash ("" = none) */
 } cbm_lsp_surface_row_t;
 
+/* The definition variants that lie in a file (graph_buffer.c "Definition
+ * variants"): one row per variant span in `file_path`, as the node it
+ * belongs to with start_line/end_line set to that span. Covers the file's
+ * own nodes (their other #if branches) and nodes whose file_path names
+ * another file that the file writes a variant of. */
+int cbm_store_find_variant_spans_by_file(cbm_store_t *s, const char *project, const char *file_path,
+                                         cbm_node_t **out, int *count);
+
 /* Find nodes overlapping a line range in a file (excludes Module/Package). */
 int cbm_store_find_nodes_by_file_overlap(cbm_store_t *s, const char *project, const char *file_path,
                                          int start_line, int end_line, cbm_node_t **out,
@@ -169,6 +177,16 @@ int cbm_store_get_dependent_files(cbm_store_t *s, const char *project,
                                   const char *const *target_files, int target_count, char ***out,
                                   int *out_count);
 void cbm_store_free_dependent_files(char **files, int count);
+
+/* Variant partners for closure-repair routing: the files that write another
+ * variant of a definition written in any of `files` (one node for a
+ * definition's platform files, header declaration and source definition, Go
+ * build-tagged files; a DEFINES edge from each file's File node). Excludes
+ * `files` themselves; served by idx_nodes_file + the edge source/target
+ * indexes. Free with cbm_store_free_dependent_files. */
+int cbm_store_get_variant_partner_files(cbm_store_t *s, const char *project,
+                                        const char *const *files, int count, char ***out,
+                                        int *out_count);
 
 /* Find edges whose properties contain a url_path matching the keyword. */
 int cbm_store_find_edges_by_url_path(cbm_store_t *s, const char *project, const char *keyword,

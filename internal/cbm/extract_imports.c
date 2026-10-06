@@ -47,7 +47,7 @@ static void parse_lisp_imports(CBMExtractCtx *ctx);
 static void parse_starlark_imports(CBMExtractCtx *ctx);
 static void parse_tcl_imports(CBMExtractCtx *ctx);
 static void parse_teal_imports(CBMExtractCtx *ctx);
-static void parse_zsh_imports(CBMExtractCtx *ctx);
+static void parse_shell_source_imports(CBMExtractCtx *ctx);
 static void parse_css_imports(CBMExtractCtx *ctx);
 static void parse_html_imports(CBMExtractCtx *ctx);
 static void parse_cmake_imports(CBMExtractCtx *ctx);
@@ -2187,10 +2187,13 @@ static void parse_teal_imports(CBMExtractCtx *ctx) {
     }
 }
 
-// --- Zsh imports ---
+// --- Bash / Zsh imports ---
 // source file / . file — `command` nodes whose command_name is "source" or ".".
-// The argument field carries the sourced path.
-static void parse_zsh_imports(CBMExtractCtx *ctx) {
+// The argument field carries the sourced path. Every other command is a call,
+// not an import: read as an import, `set -e` imported "set", which the import
+// resolver then bound to whatever project symbol is named set (a TSX method),
+// and every `set` call in the script followed it.
+static void parse_shell_source_imports(CBMExtractCtx *ctx) {
     CBMArena *a = ctx->arena;
     TSNodeStack stack;
     ts_nstack_init(&stack, ctx, CBM_SZ_512);
@@ -3049,8 +3052,7 @@ void cbm_extract_imports(CBMExtractCtx *ctx) {
         parse_generic_imports(ctx, "call");
         break;
     case CBM_LANG_BASH:
-        // source/. commands
-        parse_generic_imports(ctx, "command");
+        parse_shell_source_imports(ctx);
         break;
     case CBM_LANG_ZIG:
         parse_zig_imports(ctx);
@@ -3120,7 +3122,7 @@ void cbm_extract_imports(CBMExtractCtx *ctx) {
         parse_teal_imports(ctx);
         break;
     case CBM_LANG_ZSH:
-        parse_zsh_imports(ctx);
+        parse_shell_source_imports(ctx);
         break;
     case CBM_LANG_CMAKE:
         parse_cmake_imports(ctx);

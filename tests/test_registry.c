@@ -961,6 +961,113 @@ TEST(registry_tie_break_is_independent_of_registration_order) {
     PASS();
 }
 
+TEST(lang_resolution_compatible_families) {
+    /* Same language and the interop families the resolvers already honour. */
+    ASSERT_TRUE(cbm_lang_resolution_compatible(CBM_LANG_PYTHON, CBM_LANG_PYTHON));
+    ASSERT_TRUE(cbm_lang_resolution_compatible(CBM_LANG_JAVASCRIPT, CBM_LANG_TYPESCRIPT));
+    ASSERT_TRUE(cbm_lang_resolution_compatible(CBM_LANG_VUE, CBM_LANG_TSX));
+    ASSERT_TRUE(cbm_lang_resolution_compatible(CBM_LANG_C, CBM_LANG_CPP));
+    ASSERT_TRUE(cbm_lang_resolution_compatible(CBM_LANG_OBJC, CBM_LANG_C));
+    ASSERT_TRUE(cbm_lang_resolution_compatible(CBM_LANG_KOTLIN, CBM_LANG_JAVA));
+    ASSERT_TRUE(cbm_lang_resolution_compatible(CBM_LANG_SWIFT, CBM_LANG_OBJC));
+    ASSERT_TRUE(cbm_lang_resolution_compatible(CBM_LANG_OBJC, CBM_LANG_SWIFT));
+    /* Unknown on either side: no evidence, no filter. */
+    ASSERT_TRUE(cbm_lang_resolution_compatible(CBM_LANG_COUNT, CBM_LANG_PYTHON));
+    ASSERT_TRUE(cbm_lang_resolution_compatible(CBM_LANG_JAVASCRIPT, CBM_LANG_COUNT));
+    /* Across families: never by name alone. */
+    ASSERT_FALSE(cbm_lang_resolution_compatible(CBM_LANG_JAVASCRIPT, CBM_LANG_PYTHON));
+    ASSERT_FALSE(cbm_lang_resolution_compatible(CBM_LANG_PYTHON, CBM_LANG_TSX));
+    ASSERT_FALSE(cbm_lang_resolution_compatible(CBM_LANG_GO, CBM_LANG_C));
+    ASSERT_FALSE(cbm_lang_resolution_compatible(CBM_LANG_SWIFT, CBM_LANG_KOTLIN));
+    ASSERT_FALSE(cbm_lang_resolution_compatible(CBM_LANG_MAKEFILE, CBM_LANG_C));
+    /* Synthetic LSP sources carry their language. */
+    ASSERT_EQ(cbm_registry_synthetic_path_language("<python-builtins>"), CBM_LANG_PYTHON);
+    ASSERT_EQ(cbm_registry_synthetic_path_language("<kotlin-builtins>"), CBM_LANG_KOTLIN);
+    ASSERT_EQ(cbm_registry_synthetic_path_language("app.py"), CBM_LANG_COUNT);
+    ASSERT_EQ(cbm_registry_synthetic_path_language(NULL), CBM_LANG_COUNT);
+    PASS();
+}
+
+/* Resolve with the unfiltered chain, then apply the cross-language veto the
+ * way pass_calls.c / pass_parallel.c do. */
+static cbm_resolution_t xl_resolve(const cbm_registry_t *r, CBMLanguage lang, const char *callee,
+                                   const char *module_qn) {
+    cbm_resolution_t res = cbm_registry_resolve(r, callee, module_qn, NULL, NULL, 0);
+    if (cbm_registry_name_guess_vetoed(r, lang, &res)) {
+        res = (cbm_resolution_t){0};
+    }
+    return res;
+}
+
+TEST(name_guess_vetoed_across_languages) {
+    cbm_registry_t *r = cbm_registry_new();
+    cbm_registry_add_lang(r, "get", "builtins.dict.get", "Method", CBM_LANG_PYTHON);
+    cbm_registry_add_lang(r, "patch", "proj.web.Panel.patch", "Function", CBM_LANG_TSX);
+    cbm_registry_add_lang(r, "patch", "proj.api.client.patch", "Function", CBM_LANG_PYTHON);
+    cbm_registry_add(r, "legacy", "proj.x.legacy", "Function"); /* unknown language */
+
+    /* JS `app.get`: the only "get" is Python's -> EMPTY, not unique_name. */
+    cbm_resolution_t res = xl_resolve(r, CBM_LANG_JAVASCRIPT, "app.get", "proj.app");
+    ASSERT_TRUE(res.qualified_name == NULL || res.qualified_name[0] == '\0');
+    /* Python keeps its own builtin. */
+    res = xl_resolve(r, CBM_LANG_PYTHON, "d.get", "proj.tool");
+    ASSERT_STR_EQ(res.qualified_name, "builtins.dict.get");
+    ASSERT_STR_EQ(res.strategy, "unique_name");
+    /* Two same-named candidates: the chain still picks by import distance;
+     * the answer stands only for a caller that can call the winner. */
+    res = xl_resolve(r, CBM_LANG_PYTHON, "patch", "proj.api.x");
+    ASSERT_STR_EQ(res.qualified_name, "proj.api.client.patch");
+    ASSERT_STR_EQ(res.strategy, "suffix_match");
+    res = xl_resolve(r, CBM_LANG_TYPESCRIPT, "patch", "proj.api.x");
+    ASSERT_TRUE(res.qualified_name == NULL || res.qualified_name[0] == '\0');
+    res = xl_resolve(r, CBM_LANG_TYPESCRIPT, "patch", "proj.web.ui");
+    ASSERT_STR_EQ(res.qualified_name, "proj.web.Panel.patch");
+    /* Unknown-language entries and an unknown caller are never vetoed. */
+    res = xl_resolve(r, CBM_LANG_GO, "legacy", "proj.go");
+    ASSERT_STR_EQ(res.qualified_name, "proj.x.legacy");
+    res = xl_resolve(r, CBM_LANG_COUNT, "app.get", "proj.app");
+    ASSERT_STR_EQ(res.qualified_name, "builtins.dict.get");
+
+    /* Evidence-backed strategies are never vetoed, whatever the language. */
+    cbm_resolution_t imp = {.qualified_name = "builtins.dict.get",
+                            .strategy = "import_map",
+                            .confidence = 0.95,
+                            .candidate_count = 1};
+    ASSERT_FALSE(cbm_registry_name_guess_vetoed(r, CBM_LANG_JAVASCRIPT, &imp));
+    imp.strategy = "lsp_generic_method";
+    ASSERT_FALSE(cbm_registry_name_guess_vetoed(r, CBM_LANG_JAVASCRIPT, &imp));
+    /* The parallel field-type hint re-picks language-blind: vetoed too. */
+    imp.strategy = "field_type_hint";
+    ASSERT_TRUE(cbm_registry_name_guess_vetoed(r, CBM_LANG_JAVASCRIPT, &imp));
+    ASSERT_FALSE(cbm_registry_name_guess_vetoed(r, CBM_LANG_PYTHON, &imp));
+    cbm_registry_free(r);
+    PASS();
+}
+
+/* tests/cov.c and tests/cov.py share the module QN proj.tests.cov (module QNs
+ * drop the extension): a same_module answer across languages is that
+ * collision, not evidence. Within the caller's language it stands. */
+TEST(same_module_vetoed_across_languages) {
+    cbm_registry_t *r = cbm_registry_new();
+    cbm_registry_add_lang(r, "reducer_worker", "proj.tests.cov.reducer_worker", "Function",
+                          CBM_LANG_PYTHON);
+    cbm_registry_add_lang(r, "reducer_worker", "proj.other.reducer_worker", "Function",
+                          CBM_LANG_PYTHON);
+    cbm_registry_add_lang(r, "stat_child", "proj.tests.cov.stat_child", "Function", CBM_LANG_C);
+
+    cbm_resolution_t res =
+        cbm_registry_resolve(r, "reducer_worker", "proj.tests.cov", NULL, NULL, 0);
+    ASSERT_STR_EQ(res.strategy, "same_module");
+    ASSERT_TRUE(cbm_registry_name_guess_vetoed(r, CBM_LANG_C, &res));
+    ASSERT_FALSE(cbm_registry_name_guess_vetoed(r, CBM_LANG_PYTHON, &res));
+
+    res = cbm_registry_resolve(r, "stat_child", "proj.tests.cov", NULL, NULL, 0);
+    ASSERT_STR_EQ(res.qualified_name, "proj.tests.cov.stat_child");
+    ASSERT_FALSE(cbm_registry_name_guess_vetoed(r, CBM_LANG_C, &res));
+    cbm_registry_free(r);
+    PASS();
+}
+
 TEST(cross_language_suffix_match_drops_py_vs_js) {
     /* #725: two same-named symbols in different languages. suffix_match is the
      * strategy that collapses them; unique_name is #1572 and must stay. */
@@ -1473,6 +1580,9 @@ SUITE(registry) {
     RUN_TEST(perl_suppress_drops_weak_builtin_and_method_matches);
     RUN_TEST(perl_suppress_keeps_high_confidence_and_genuine_calls);
     RUN_TEST(cross_language_suffix_match_drops_py_vs_js);
+    RUN_TEST(lang_resolution_compatible_families);
+    RUN_TEST(name_guess_vetoed_across_languages);
+    RUN_TEST(same_module_vetoed_across_languages);
     RUN_TEST(cross_language_config_caller_drops_unique_name_too);
     RUN_TEST(registry_tie_break_is_independent_of_registration_order);
     RUN_TEST(cross_language_ref_drops_go_vs_c);

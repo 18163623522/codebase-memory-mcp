@@ -3758,6 +3758,32 @@ TEST(go_cgo_pseudo_import_dropped) {
     PASS();
 }
 
+/* A Bash script imports the files it sources and nothing else. Every top-level
+ * command used to be read as an import of its command name (`set -e` imported
+ * "set", `source x.sh` imported "source"), which the import resolver bound to
+ * any project symbol of that name; the sourced paths themselves were lost. */
+TEST(bash_imports_are_sourced_files_only) {
+    CBMFileResult *r = extract("#!/usr/bin/env bash\nset -euo pipefail\nsource ./lib/util.sh\n"
+                               ". \"$DIR/other.sh\"\ncd build\nmake all\n"
+                               "if true; then\n  source nested.sh\nfi\n",
+                               CBM_LANG_BASH, "t", "run.sh");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_EQ(r->imports.count, 3);
+    ASSERT(has_import(r, "lib/util.sh"));
+    ASSERT(has_import(r, "other.sh"));
+    ASSERT(has_import(r, "nested.sh"));
+    static const char *const commands[] = {"set", "source", ".", "cd", "make"};
+    for (int i = 0; i < r->imports.count; i++) {
+        ASSERT_NOT_NULL(r->imports.items[i].module_path);
+        for (size_t c = 0; c < sizeof(commands) / sizeof(commands[0]); c++) {
+            ASSERT_TRUE(strcmp(r->imports.items[i].module_path, commands[c]) != 0);
+        }
+    }
+    cbm_free_result(r);
+    PASS();
+}
+
 /* #1935: Go struct fields were never extracted — find_class_body() returns the
  * struct_type node, whose only named child is a field_declaration_list, so the
  * member loop matched nothing and every field was silently skipped (0 Field
@@ -5248,10 +5274,11 @@ TEST(swift_non_url_constructor_untouched_issue1892) {
  * the per-file constant map and resolved at the call site, for both return
  * statements and arrow expression bodies. */
 TEST(extract_ts_await_generic_call_issue2210) {
-    CBMFileResult *r = extract("function parseJsonBody<T>() { return {} as T; }\n"
-                               "async function plain() { return await parseJsonBody(); }\n"
-                               "async function generic() { return await parseJsonBody<string>(); }\n",
-                               CBM_LANG_TYPESCRIPT, "t", "await.ts");
+    CBMFileResult *r =
+        extract("function parseJsonBody<T>() { return {} as T; }\n"
+                "async function plain() { return await parseJsonBody(); }\n"
+                "async function generic() { return await parseJsonBody<string>(); }\n",
+                CBM_LANG_TYPESCRIPT, "t", "await.ts");
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
     ASSERT_EQ(count_calls_named(r, "parseJsonBody"), 2);
@@ -9748,6 +9775,7 @@ SUITE(extraction) {
     RUN_TEST(js_imports);
     RUN_TEST(go_imports);
     RUN_TEST(go_cgo_pseudo_import_dropped);
+    RUN_TEST(bash_imports_are_sourced_files_only);
     RUN_TEST(extract_go_struct_fields_have_nodes);
     RUN_TEST(java_imports);
     RUN_TEST(rust_imports);

@@ -89,8 +89,8 @@ struct cbm_ti_graph {
 };
 
 static bool ts_seedless(const char *label) {
-    static const char *const seedless[] = {"File",    "Folder",  "Project", "Module",
-                                           "Package", "Section", "Route",   "Resource"};
+    static const char *const seedless[] = {"File",    "Folder", "Project", "Module",  "Package",
+                                           "Section", "Route",  "Process", "Resource"};
     for (size_t i = 0; i < sizeof(seedless) / sizeof(seedless[0]); i++) {
         if (label && strcmp(label, seedless[i]) == 0) {
             return true;
@@ -146,32 +146,69 @@ static int ts_node_compare(const void *left, const void *right) {
     return a->id < b->id ? -1 : (a->id > b->id ? 1 : 0);
 }
 
+static bool ts_node_from_row(cbm_ti_graph_t *g, cbm_ti_node_t *n, const cbm_node_t *row) {
+    n->id = row->id;
+    n->label = cbm_arena_strdup(&g->arena, row->label ? row->label : "");
+    n->name = cbm_arena_strdup(&g->arena, row->name ? row->name : "");
+    n->qualified_name = cbm_arena_strdup(&g->arena, row->qualified_name ? row->qualified_name : "");
+    n->start_line = row->start_line;
+    n->end_line = row->end_line;
+    n->variant_span = false;
+    return n->label && n->name && n->qualified_name;
+}
+
+static bool ts_has_span(const cbm_ti_node_t *nodes, int count, const cbm_node_t *row) {
+    for (int i = 0; i < count; i++) {
+        if (nodes[i].id == row->id && nodes[i].start_line == row->start_line &&
+            nodes[i].end_line == row->end_line) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* The file's definitions, each with every span it has in the file: a
+ * definition written once per #if branch or platform file is ONE node
+ * (graph_buffer.c "Definition variants") whose own span is one variant, so
+ * its other variants here (other branches, or a node whose file_path names
+ * another platform file) join as further spans of the same node. A change
+ * in any variant then seeds that definition. */
 static ts_file_t *ts_load_file(cbm_ti_graph_t *g, const char *file) {
     cbm_node_t *rows = NULL;
     int count = 0;
     if (cbm_store_find_nodes_by_file(g->store, g->project, file, &rows, &count) != CBM_STORE_OK) {
         return NULL;
     }
+    cbm_node_t *spans = NULL;
+    int span_count = 0;
+    if (cbm_store_find_variant_spans_by_file(g->store, g->project, file, &spans, &span_count) !=
+        CBM_STORE_OK) {
+        cbm_store_free_nodes(rows, count);
+        return NULL;
+    }
+    int total = count + span_count;
     ts_file_t *f = cbm_arena_calloc(&g->arena, sizeof(*f));
-    cbm_ti_node_t *nodes = cbm_arena_alloc(&g->arena, (size_t)(count ? count : 1) * sizeof(*nodes));
+    cbm_ti_node_t *nodes = cbm_arena_alloc(&g->arena, (size_t)(total ? total : 1) * sizeof(*nodes));
     const char *key = cbm_arena_strdup(&g->arena, file);
     bool ok = f && nodes && key;
     int kept = 0;
     for (int i = 0; ok && i < count; i++) {
-        if (ts_seedless(rows[i].label)) {
-            continue;
+        if (!ts_seedless(rows[i].label)) {
+            ok = ts_node_from_row(g, &nodes[kept++], &rows[i]);
         }
-        cbm_ti_node_t *n = &nodes[kept++];
-        n->id = rows[i].id;
-        n->label = cbm_arena_strdup(&g->arena, rows[i].label ? rows[i].label : "");
-        n->name = cbm_arena_strdup(&g->arena, rows[i].name ? rows[i].name : "");
-        n->qualified_name =
-            cbm_arena_strdup(&g->arena, rows[i].qualified_name ? rows[i].qualified_name : "");
-        n->start_line = rows[i].start_line;
-        n->end_line = rows[i].end_line;
-        ok = n->label && n->name && n->qualified_name;
+    }
+    for (int i = 0; ok && i < span_count; i++) {
+        if (!ts_seedless(spans[i].label) && !ts_has_span(nodes, kept, &spans[i])) {
+            bool listed = false;
+            for (int j = 0; j < kept && !listed; j++) {
+                listed = nodes[j].id == spans[i].id;
+            }
+            ok = ts_node_from_row(g, &nodes[kept], &spans[i]);
+            nodes[kept++].variant_span = listed;
+        }
     }
     cbm_store_free_nodes(rows, count);
+    cbm_store_free_nodes(spans, span_count);
     if (!ok) {
         return NULL;
     }

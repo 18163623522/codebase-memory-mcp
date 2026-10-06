@@ -375,12 +375,14 @@ EXTRACTION_SRCS = \
     $(CBM_DIR)/extract_dbt.c \
     $(CBM_DIR)/sql_values.c \
     $(CBM_DIR)/helpers.c \
+    $(CBM_DIR)/cpp_branch_views.c \
     $(CBM_DIR)/result_compact.c \
     $(CBM_DIR)/result_spill.c \
     $(CBM_DIR)/lang_specs.c \
     $(CBM_DIR)/macro_table.c \
     $(CBM_DIR)/iris_export_xml.c \
-    $(CBM_DIR)/service_patterns.c
+    $(CBM_DIR)/service_patterns.c \
+    $(CBM_DIR)/spawn_patterns.c
 
 # LSP resolvers (compiled as one unit via lsp_all.c)
 LSP_SRCS = $(CBM_DIR)/lsp_all.c
@@ -481,6 +483,7 @@ PIPELINE_SRCS = \
     src/pipeline/pass_parallel.c \
     src/pipeline/pass_definitions.c \
     src/pipeline/pass_calls.c \
+    src/pipeline/pass_spawns.c \
     src/pipeline/pass_lsp_cross.c \
     src/pipeline/pass_usages.c \
     src/pipeline/pass_semantic.c \
@@ -790,7 +793,7 @@ TEST_JAVA_LSP_SRCS = tests/test_java_lsp.c tests/test_java_lsp_coverage.c
 TEST_KOTLIN_LSP_SRCS = tests/test_kotlin_lsp.c
 TEST_RUST_LSP_SRCS = tests/test_rust_lsp.c
 
-TEST_INTEGRATION_SRCS = tests/test_integration.c tests/test_incremental.c tests/test_lang_contract.c tests/test_edge_imports.c tests/test_edge_structural.c tests/test_lsp_resolution_probe.c tests/test_node_creation_probe.c tests/test_edge_types_probe.c tests/test_convergence_probe.c tests/test_matrix_known_classes.c tests/test_matrix_new_constructs.c tests/test_grammar_probe_a.c tests/test_grammar_probe_b.c tests/test_grammar_probe_c.c tests/test_grammar_probe_d.c tests/test_grammar_probe_e.c tests/test_grammar_probe_f.c tests/test_grammar_probe_g.c
+TEST_INTEGRATION_SRCS = tests/test_integration.c tests/test_incremental.c tests/test_lang_contract.c tests/test_edge_imports.c tests/test_edge_structural.c tests/test_lsp_resolution_probe.c tests/test_node_creation_probe.c tests/test_edge_types_probe.c tests/test_convergence_probe.c tests/test_matrix_known_classes.c tests/test_matrix_new_constructs.c tests/test_grammar_probe_a.c tests/test_grammar_probe_b.c tests/test_grammar_probe_c.c tests/test_grammar_probe_d.c tests/test_grammar_probe_e.c tests/test_grammar_probe_f.c tests/test_grammar_probe_g.c tests/test_conditional_variants.c tests/test_spawns.c
 
 TEST_TRACES_SRCS = tests/test_traces.c
 

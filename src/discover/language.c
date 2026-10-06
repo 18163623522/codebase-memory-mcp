@@ -122,11 +122,16 @@ static const ext_entry_t EXT_TABLE[] = {
     {".frm", CBM_LANG_FORM},
     {".prc", CBM_LANG_FORM},
 
-    /* Fortran */
+    /* Fortran. Upper-case suffixes are the C-preprocessed spellings of the
+     * same free-form sources (#ifdef blocks); lookup is case-sensitive. */
     {".f03", CBM_LANG_FORTRAN},
     {".f08", CBM_LANG_FORTRAN},
     {".f90", CBM_LANG_FORTRAN},
     {".f95", CBM_LANG_FORTRAN},
+    {".F03", CBM_LANG_FORTRAN},
+    {".F08", CBM_LANG_FORTRAN},
+    {".F90", CBM_LANG_FORTRAN},
+    {".F95", CBM_LANG_FORTRAN},
 
     /* GLSL */
     {".frag", CBM_LANG_GLSL},

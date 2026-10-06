@@ -3561,12 +3561,6 @@ static const char **extract_decorators(CBMArena *a, TSNode node, const char *sou
     return result;
 }
 
-/* Rust: two same-named functions guarded by mutually-exclusive #[cfg(...)]
- * attributes both parse as distinct function_item nodes and otherwise receive
- * the SAME qualified_name, so the second graph upsert silently overwrites the
- * first and one branch is lost (#495). Fold the cfg predicate into the QN so
- * each cfg-gated twin gets a DISTINCT, predicate-encoding QN. Returns the
- * (possibly suffixed) QN; the original QN when no cfg attribute is present. */
 /* Rust: mark a function as a test when it carries a test attribute (#855).
  * cbm's test detection is otherwise file-path-based (cbm_is_test_file:
  * *_test.rs / test_*), so inline #[test]/#[tokio::test] functions inside a
@@ -3594,32 +3588,6 @@ static bool rust_def_is_test(const char *const *decorators) {
         }
     }
     return false;
-}
-
-static const char *rust_cfg_qualified_name(CBMArena *a, const char *base_qn,
-                                           const char *const *decorators) {
-    if (!decorators) {
-        return base_qn;
-    }
-    for (int i = 0; decorators[i]; i++) {
-        const char *cfg = strstr(decorators[i], "cfg(");
-        if (!cfg) {
-            continue;
-        }
-        /* Build a compact predicate suffix from the cfg(...) text, dropping
-         * whitespace and quotes so the QN stays readable and stable. */
-        char buf[CBM_SZ_256];
-        size_t bi = 0;
-        for (const char *p = cfg; *p && bi + 1 < sizeof(buf); p++) {
-            if (*p == ' ' || *p == '\t' || *p == '"' || *p == '\'') {
-                continue;
-            }
-            buf[bi++] = *p;
-        }
-        buf[bi] = '\0';
-        return cbm_arena_sprintf(a, "%s#%s", base_qn, buf);
-    }
-    return base_qn;
 }
 
 // Extract base class name text from a single base_class child node.
@@ -6261,6 +6229,14 @@ static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec 
      * proj.myapp.db.Func, not proj.myapp.db.conn.Func). Other langs unchanged. */
     def.qualified_name =
         cbm_fqn_compute_source_lang(a, ctx->project, ctx->rel_path, qn_name, ctx->language);
+    /* C-family platform variants (foo_win.c / foo_posix.c, src/unix/ vs
+     * src/win/): an external-linkage file-scope function takes its
+     * platform-neutral QN, so its variants are one definition. The call-scope
+     * twin in extract_unified.c applies the same rule. */
+    if (!ctx->enclosing_class_qn) {
+        def.qualified_name = cbm_platform_variant_qn(a, ctx->language, ctx->project, ctx->rel_path,
+                                                     qn_name, def.qualified_name, node);
+    }
     /* A free function declared inside a namespace (C++/C#/PHP) is qualified by
      * the namespace scope the def walk carries (enclosing_class_qn was extended
      * by is_namespace_scope_kind), so `ns::serialize` is `proj.file.ns.serialize`
@@ -6385,10 +6361,13 @@ static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec 
     def.decorators = extract_decorators(a, node, ctx->source, ctx->language, spec);
     extract_route_from_decorators(a, node, ctx->source, spec, &def.route_path, &def.route_method);
 
-    // Rust: disambiguate cfg-gated twin functions by folding the #[cfg(...)]
-    // predicate into the QN so both branches survive the graph upsert (#495).
+    // Rust: cfg-gated twins (#[cfg(windows)] fn f / #[cfg(not(windows))] fn f)
+    // keep the plain QN: they are variants of ONE definition, and the graph
+    // keeps every twin's span and the union of their bodies' calls on one node
+    // (graph_buffer.c, "Definition variants"). #495's lost branch is a variant
+    // now; the old per-twin `f#cfg(...)` QNs left the bodies' calls without a
+    // source node (calls are scoped to the plain QN).
     if (ctx->language == CBM_LANG_RUST) {
-        def.qualified_name = rust_cfg_qualified_name(a, def.qualified_name, def.decorators);
         def.is_test = rust_def_is_test(def.decorators);
     }
 
@@ -7820,20 +7799,94 @@ static void push_method_def(CBMExtractCtx *ctx, TSNode child, TSNode class_node,
 }
 
 // Extract methods from an ObjC implementation_definition node.
-static void extract_objc_impl_methods(CBMExtractCtx *ctx, TSNode impl_node, const char *class_qn,
-                                      const CBMLangSpec *spec) {
-    uint32_t nc = ts_node_child_count(impl_node);
-    for (uint32_t j = 0; j < nc; j++) {
-        TSNode inner = ts_node_child(impl_node, j);
-        if (ts_node_is_null(inner)) {
+/* Members of a class body, flattened through conditional blocks: a method,
+ * field or variable inside #if/#ifdef/#else/#elif (cbm_conditional_block_types:
+ * C, C++, CUDA, Objective-C, C#, ...) is still a member of its class, and its
+ * #else twin is a variant of the same member (graph_buffer.c, "Definition
+ * variants"). One tree cursor: linear in the body's width, no recursion. */
+enum { MEMBER_CONDITIONAL_DEPTH_MAX = 16 };
+
+typedef struct {
+    TSTreeCursor cursor;
+    const char **conditional;
+    int depth; /* conditional blocks entered below the body */
+    bool started;
+    bool named;
+} member_iter_t;
+
+static void member_iter_init(member_iter_t *it, TSNode body, CBMLanguage lang, bool named) {
+    it->cursor = ts_tree_cursor_new(body);
+    it->conditional = cbm_conditional_block_types(lang);
+    it->depth = 0;
+    it->started = false;
+    it->named = named;
+}
+
+static void member_iter_done(member_iter_t *it) {
+    ts_tree_cursor_delete(&it->cursor);
+}
+
+static bool member_iter_advance(member_iter_t *it) {
+    if (!it->started) {
+        it->started = true;
+        return ts_tree_cursor_goto_first_child(&it->cursor);
+    }
+    while (!ts_tree_cursor_goto_next_sibling(&it->cursor)) {
+        if (it->depth == 0) {
+            return false;
+        }
+        ts_tree_cursor_goto_parent(&it->cursor);
+        it->depth--;
+    }
+    return true;
+}
+
+static bool member_iter_next(member_iter_t *it, TSNode *out) {
+    for (bool have = member_iter_advance(it); have; have = member_iter_advance(it)) {
+        TSNode node = ts_tree_cursor_current_node(&it->cursor);
+        while (it->conditional && it->depth < MEMBER_CONDITIONAL_DEPTH_MAX &&
+               cbm_kind_in_set(node, it->conditional) &&
+               ts_tree_cursor_goto_first_child(&it->cursor)) {
+            it->depth++;
+            node = ts_tree_cursor_current_node(&it->cursor);
+        }
+        if (it->conditional && cbm_kind_in_set(node, it->conditional)) {
+            continue; /* an empty (or too deeply nested) block holds no member */
+        }
+        if (it->named && !ts_node_is_named(node)) {
             continue;
         }
-        if (cbm_kind_in_set(inner, spec->function_node_types)) {
-            TSNode nm = resolve_method_name(inner, ctx->language);
-            if (!ts_node_is_null(nm)) {
-                push_method_def(ctx, inner, impl_node, class_qn, spec, nm);
+        *out = node;
+        return true;
+    }
+    return false;
+}
+
+/* Objective-C wraps every @implementation member in an implementation_definition,
+ * and a #if/#else block inside @implementation wraps each branch's members in
+ * another one: walk those nested wrappers too (worklist, no recursion). */
+static void extract_objc_impl_methods(CBMExtractCtx *ctx, TSNode impl_node, const char *class_qn,
+                                      const CBMLangSpec *spec) {
+    TSNode pending[MEMBER_CONDITIONAL_DEPTH_MAX];
+    int count = 0;
+    pending[count++] = impl_node;
+    while (count > 0) {
+        TSNode cur = pending[--count];
+        member_iter_t it;
+        member_iter_init(&it, cur, ctx->language, false);
+        TSNode inner;
+        while (member_iter_next(&it, &inner)) {
+            if (cbm_kind_in_set(inner, spec->function_node_types)) {
+                TSNode nm = resolve_method_name(inner, ctx->language);
+                if (!ts_node_is_null(nm)) {
+                    push_method_def(ctx, inner, impl_node, class_qn, spec, nm);
+                }
+            } else if (count < MEMBER_CONDITIONAL_DEPTH_MAX &&
+                       strcmp(ts_node_type(inner), "implementation_definition") == 0) {
+                pending[count++] = inner;
             }
         }
+        member_iter_done(&it);
     }
 }
 
@@ -7845,12 +7898,10 @@ static void extract_class_methods(CBMExtractCtx *ctx, TSNode class_node, const c
         return;
     }
 
-    uint32_t count = ts_node_child_count(body);
-    for (uint32_t i = 0; i < count; i++) {
-        TSNode child = ts_node_child(body, i);
-        if (ts_node_is_null(child)) {
-            continue;
-        }
+    member_iter_t it;
+    member_iter_init(&it, body, ctx->language, false);
+    TSNode child;
+    while (member_iter_next(&it, &child)) {
 
         if (ctx->language == CBM_LANG_OBJC &&
             strcmp(ts_node_type(child), "implementation_definition") == 0) {
@@ -7939,6 +7990,7 @@ static void extract_class_methods(CBMExtractCtx *ctx, TSNode class_node, const c
 
         push_method_def(ctx, method_node, class_node, class_qn, spec, name_node);
     }
+    member_iter_done(&it);
 }
 
 // --- Rust impl block extraction ---
@@ -8153,6 +8205,22 @@ static void extract_elixir_call(CBMExtractCtx *ctx, TSNode node, const CBMLangSp
         if (strcmp(macro, "def") == 0 || strcmp(macro, "defp") == 0 ||
             strcmp(macro, "defmacro") == 0) {
             extract_elixir_func_def(ctx, cur, macro);
+        } else if (strcmp(macro, "if") == 0 || strcmp(macro, "unless") == 0) {
+            /* A compile-time if/unless in a module body defines functions
+             * under a condition: its do and else branches hold variants of the
+             * same definitions (graph_buffer.c, "Definition variants"). The
+             * grammar nests the else_block inside the do_block. */
+            TSNode branch = cbm_find_child_by_kind(cur, "do_block");
+            for (int pass = 0; pass < 2 && !ts_node_is_null(branch); pass++) {
+                uint32_t bc = ts_node_child_count(branch);
+                for (int bi = (int)bc - SKIP_CHAR; bi >= 0; bi--) {
+                    TSNode bchild = ts_node_child(branch, (uint32_t)bi);
+                    if (!ts_node_is_null(bchild) && strcmp(ts_node_type(bchild), "call") == 0) {
+                        ts_nstack_push(&stack, bchild);
+                    }
+                }
+                branch = cbm_find_child_by_kind(branch, "else_block");
+            }
         } else if (strcmp(macro, "defmodule") == 0) {
             TSNode do_block = emit_elixir_module_class(ctx, cur);
             if (!ts_node_is_null(do_block)) {
@@ -9811,10 +9879,10 @@ static void extract_class_fields(CBMExtractCtx *ctx, TSNode class_node, const ch
     }
 
     CBMArena *a = ctx->arena;
-    uint32_t count = ts_node_named_child_count(body);
-    for (uint32_t i = 0; i < count; i++) {
-        TSNode child = ts_node_named_child(body, i);
-
+    member_iter_t it;
+    member_iter_init(&it, body, ctx->language, true);
+    TSNode child;
+    while (member_iter_next(&it, &child)) {
         // ObjectScript UDL wraps each member in a class_statement node.
         if (ctx->language == CBM_LANG_OBJECTSCRIPT_UDL &&
             strcmp(ts_node_type(child), "class_statement") == 0 &&
@@ -10128,6 +10196,7 @@ static void extract_class_fields(CBMExtractCtx *ctx, TSNode class_node, const ch
 
         cbm_defs_push(&ctx->result->defs, a, def);
     }
+    member_iter_done(&it);
 }
 
 // Extract class-level variables (field declarations inside class bodies)
@@ -10146,13 +10215,15 @@ static void extract_class_variables(CBMExtractCtx *ctx, TSNode class_node, const
      * push_var_def_qn); saved/restored so module-level minting stays bare. */
     const char *saved_parent = ctx->var_parent_class;
     ctx->var_parent_class = class_qn;
-    uint32_t count = ts_node_named_child_count(body);
-    for (uint32_t i = 0; i < count; i++) {
-        TSNode child = ts_node_named_child(body, i);
+    member_iter_t it;
+    member_iter_init(&it, body, ctx->language, true);
+    TSNode child;
+    while (member_iter_next(&it, &child)) {
         if (cbm_kind_in_set(child, spec->variable_node_types)) {
             extract_var_names(ctx, child, spec);
         }
     }
+    member_iter_done(&it);
     ctx->var_parent_class = saved_parent;
 }
 
@@ -10312,8 +10383,10 @@ static void push_nested_class_nodes(TSNode body, const CBMLangSpec *spec, wd_sta
                 wd_push(s, child, enclosing_qn);
             } else {
                 const char *ck = ts_node_type(child);
+                /* A nested class inside #if/#else is still nested here. */
                 if (strcmp(ck, "field_declaration") == 0 ||
-                    strcmp(ck, "template_declaration") == 0 || strcmp(ck, "declaration") == 0) {
+                    strcmp(ck, "template_declaration") == 0 || strcmp(ck, "declaration") == 0 ||
+                    cbm_kind_in_set(child, cbm_conditional_block_types(spec->language))) {
                     ts_nstack_push(&nc_stack, child);
                 }
             }

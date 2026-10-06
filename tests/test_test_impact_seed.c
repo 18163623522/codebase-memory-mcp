@@ -286,8 +286,93 @@ TEST(test_impact_seed_unclassified_header_lines_escalate_the_file) {
     PASS();
 }
 
+/* One definition with variants (graph_buffer.c "Definition variants") is one
+ * node holding one variant's span; the others are in its `variants`
+ * property, in the same file (#if branches) or in another file that DEFINES
+ * it too (platform files). A hunk in ANY variant seeds that node. */
+TEST(test_impact_seed_variant_spans_seed_their_definition) {
+    static const char pick_src[] = "#ifdef _WIN32\nvoid pick(void) {\n  beta();\n}\n#else\n"
+                                   "void pick(void) {\n  alpha();\n}\n#endif\n";
+    const char *files[] = {"src/pick.c",       pick_src,
+                           "src/plat_linux.c", "void plat(void) {\n  alpha();\n}\n",
+                           "src/plat_win.c",   "void plat(void) {\n  beta();\n}\n"};
+    tsd_fixture_t f;
+    ASSERT_TRUE(tsd_open(&f, files, 6));
+    cbm_node_t pick = {.project = "p",
+                       .label = "Function",
+                       .name = "pick",
+                       .qualified_name = "p.src.pick.pick",
+                       .file_path = "src/pick.c",
+                       .start_line = 2,
+                       .end_line = 4,
+                       .properties_json = "{\"variants\":["
+                                          "{\"file_path\":\"src/pick.c\",\"start_line\":2,"
+                                          "\"end_line\":4},"
+                                          "{\"file_path\":\"src/pick.c\",\"start_line\":6,"
+                                          "\"end_line\":8}]}"};
+    int64_t pick_id = cbm_store_upsert_node(f.store, &pick);
+    cbm_node_t plat = {.project = "p",
+                       .label = "Function",
+                       .name = "plat",
+                       .qualified_name = "p.src.plat.plat",
+                       .file_path = "src/plat_linux.c",
+                       .start_line = 1,
+                       .end_line = 3,
+                       .properties_json = "{\"variants\":["
+                                          "{\"file_path\":\"src/plat_linux.c\",\"start_line\":1,"
+                                          "\"end_line\":3},"
+                                          "{\"file_path\":\"src/plat_win.c\",\"start_line\":1,"
+                                          "\"end_line\":3}]}"};
+    int64_t plat_id = cbm_store_upsert_node(f.store, &plat);
+    cbm_node_t win_file = {.project = "p",
+                           .label = "File",
+                           .name = "plat_win.c",
+                           .qualified_name = "p.src.plat_win.c.__file__",
+                           .file_path = "src/plat_win.c"};
+    int64_t win_file_id = cbm_store_upsert_node(f.store, &win_file);
+    cbm_edge_t defines = {
+        .project = "p", .source_id = win_file_id, .target_id = plat_id, .type = "DEFINES"};
+    ASSERT_TRUE(pick_id > 0 && plat_id > 0 && win_file_id > 0);
+    ASSERT_TRUE(cbm_store_insert_edge(f.store, &defines) > 0);
+
+    /* The #else branch (lines 6-8). */
+    static const char *const added[] = {"  alpha2();"};
+    static const char *const removed[] = {"  alpha();"};
+    cbm_diff_hunk_t branch = {.start = 7,
+                              .count = 1,
+                              .added = added,
+                              .added_count = 1,
+                              .removed = removed,
+                              .removed_count = 1};
+    cbm_ti_change_t change = {.path = "src/pick.c", .hunks = &branch, .hunk_count = 1};
+    cbm_ti_seeds_t *s = tsd_seed(&f, &change, 1);
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(tsd_seed_count(s), 1);
+    ASSERT_TRUE(tsd_seeded(s, pick_id));
+    cbm_ti_seeds_free(s);
+
+    /* The Windows platform file, whose variant lives on plat_linux.c's node. */
+    static const char *const win_added[] = {"  beta2();"};
+    static const char *const win_removed[] = {"  beta();"};
+    cbm_diff_hunk_t win = {.start = 2,
+                           .count = 1,
+                           .added = win_added,
+                           .added_count = 1,
+                           .removed = win_removed,
+                           .removed_count = 1};
+    cbm_ti_change_t win_change = {.path = "src/plat_win.c", .hunks = &win, .hunk_count = 1};
+    s = tsd_seed(&f, &win_change, 1);
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(tsd_seed_count(s), 1);
+    ASSERT_TRUE(tsd_seeded(s, plat_id));
+    cbm_ti_seeds_free(s);
+    tsd_close(&f);
+    PASS();
+}
+
 SUITE(test_impact_seed) {
     RUN_TEST(test_impact_seed_hunks_follow_the_reference);
+    RUN_TEST(test_impact_seed_variant_spans_seed_their_definition);
     RUN_TEST(test_impact_seed_changed_cases_and_suites_are_reported);
     RUN_TEST(test_impact_seed_deleted_names_are_found_by_text);
     RUN_TEST(test_impact_seed_header_names_propagate_through_includes_and_macros);
