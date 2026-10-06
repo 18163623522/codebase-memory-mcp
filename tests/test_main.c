@@ -42,6 +42,7 @@ int tf_deselected_count = 0;
 #include <io.h>
 #include <winsock2.h> /* #798 follow-up: socket-isolation re-exec probe */
 #include <windows.h>
+#include "foundation/win_utf8.h" /* cbm_module_path_utf8 — the runner's own image */
 #else
 #include <unistd.h>
 #ifdef __APPLE__
@@ -1891,11 +1892,33 @@ extern int tf_maybe_run_subprocess_stdout_probe(int argc, char **argv);
 extern void tf_test_impact_runner_filter_set_binary(const char *path);
 extern int tf_maybe_run_git_facts_diff_probe(int argc, char **argv);
 
+/* The runner's own image, for the tests that start or copy it again. argv[0]
+ * is the caller's spelling, and a Windows parent that found the runner by
+ * search (the native python scheduler, scripts/run-test-wave.py) passes it
+ * without ".exe", which an exact spawn or copy of that path cannot open. */
+const char *tf_runner_image(int argc, char **argv);
+const char *tf_runner_image(int argc, char **argv) {
+#ifdef _WIN32
+    static char image[4096];
+    if (!image[0]) {
+        char *module = cbm_module_path_utf8();
+        if (module && strlen(module) < sizeof(image)) {
+            memcpy(image, module, strlen(module) + 1);
+        }
+        free(module);
+    }
+    if (image[0]) {
+        return image;
+    }
+#endif
+    return argc > 0 && argv ? argv[0] : NULL;
+}
+
 int main(int argc, char **argv) {
     /* #2003: never let a caller's GIT_DIR/GIT_INDEX_FILE/... redirect fixture
      * git commands at the caller's real repository. */
     th_clear_git_repo_env();
-    tf_test_impact_runner_filter_set_binary(argc > 0 && argv ? argv[0] : NULL);
+    tf_test_impact_runner_filter_set_binary(tf_runner_image(argc, argv));
 #ifdef CBM_TEST_COVERAGE
     tf_coverage_process_init();
 #ifndef _WIN32

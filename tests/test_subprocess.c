@@ -1507,12 +1507,13 @@ static void sp_stdout_payload(unsigned char bytes[SP_STDOUT_BYTES]) {
 /* Called before normal harness setup. Normal entry remembers argv[0], whose
  * storage lasts through main; the private exact argv grammar never runs suites. */
 static int sp_stdin_probe(int argc, char **argv);
+const char *tf_runner_image(int argc, char **argv); /* test_main.c */
 int tf_maybe_run_subprocess_stdout_probe(int argc, char **argv);
 int tf_maybe_run_subprocess_stdout_probe(int argc, char **argv) {
     if (argc >= 2 && argv && strcmp(argv[1], "__cbm_subprocess_stdin_probe") == 0)
         return sp_stdin_probe(argc, argv);
     if (argc < 2 || !argv || strcmp(argv[1], "__cbm_subprocess_stdout_probe") != 0) {
-        sp_stdout_test_binary = argc > 0 && argv ? argv[0] : NULL;
+        sp_stdout_test_binary = tf_runner_image(argc, argv);
         return -1;
     }
     if (argc != 4 || (strcmp(argv[2], "binary") != 0 && strcmp(argv[2], "text") != 0 &&

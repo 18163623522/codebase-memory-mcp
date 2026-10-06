@@ -53,6 +53,7 @@ static bool gf_write(const char *path, const void *bytes, size_t length) {
 /* Native executable fixture for Git's optional diff/textconv command. Extra
  * arguments added by Git are deliberately ignored. Normal harness entry keeps
  * argv[0] for a private executable copy; neither mode changes the environment. */
+const char *tf_runner_image(int argc, char **argv); /* test_main.c */
 int tf_maybe_run_git_facts_diff_probe(int argc, char **argv);
 int tf_maybe_run_git_facts_diff_probe(int argc, char **argv) {
     if (argc >= 2 && argv && strcmp(argv[1], "__cbm_git_facts_diff_probe") == 0) {
@@ -74,7 +75,7 @@ int tf_maybe_run_git_facts_diff_probe(int argc, char **argv) {
         }
         argv[1] = "test_impact_git";
     }
-    gf_runner_binary = argc > 0 && argv ? argv[0] : NULL;
+    gf_runner_binary = tf_runner_image(argc, argv);
     return -1;
 }
 
