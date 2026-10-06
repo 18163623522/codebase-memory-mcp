@@ -1124,6 +1124,10 @@ static int g_hold_until_exit = 0;
 void cbm_subprocess_hold_parent_until_child_exits_for_testing(int spawns) {
     g_hold_until_exit = spawns > 0 ? spawns : 0;
 }
+static int g_observe_exiting = 0;
+void cbm_subprocess_observe_exiting_child_for_testing(int spawns) {
+    g_observe_exiting = spawns > 0 ? spawns : 0;
+}
 int cbm_subprocess_pending_spawn_eagain_for_testing(void) {
     return g_force_spawn_eagain;
 }
@@ -1400,12 +1404,22 @@ static int cbm_posix_spawn_apple(cbm_subprocess_t *process, int input, int outpu
 }
 #endif
 
-/* The child exited and waits to be reaped (WNOWAIT leaves it for the
- * supervision to collect with its exit status). */
-static bool cbm_posix_child_exited(pid_t pid) {
-    siginfo_t info;
-    memset(&info, 0, sizeof(info));
-    return waitid(P_PID, (id_t)pid, &info, WEXITED | WNOHANG | WNOWAIT) == 0 && info.si_pid == pid;
+/* Our own unreaped child that setpgid/getpgid cannot find (ESRCH) is not
+ * running: it has exited, or is exiting -- macOS stops finding a child as it
+ * starts to exit, before waitid can report it. Wait until it is reapable;
+ * the wait ends with its exit, and WNOWAIT leaves it for the supervision to
+ * collect with its exit status. */
+static bool cbm_posix_child_reapable(pid_t pid) {
+    for (;;) {
+        siginfo_t info;
+        memset(&info, 0, sizeof(info));
+        if (waitid(P_PID, (id_t)pid, &info, WEXITED | WNOWAIT) == 0) {
+            return info.si_pid == pid;
+        }
+        if (errno != EINTR) {
+            return false;
+        }
+    }
 }
 
 static int cbm_subprocess_spawn_posix(cbm_subprocess_t *process) {
@@ -1543,15 +1557,30 @@ static int cbm_subprocess_spawn_posix(cbm_subprocess_t *process) {
 #endif
     /* Parent and child both establish the group, removing scheduler-order races.
      * If the child won and already execed, EACCES is accepted only after proving
-     * that its process group is the expected isolated one. A child that already
-     * EXITED is a finished run, not a failed spawn: macOS no longer shows an
-     * unreaped child to setpgid/getpgid (ESRCH), and on a loaded machine a short
-     * command (`git write-tree`) finishes before the parent gets here. Its group
-     * was set before exec, by the spawn attributes or by the child itself; the
+     * that its process group is the expected isolated one. A child that has
+     * EXITED, or is exiting, is a finished run, not a failed spawn: macOS no
+     * longer shows such an unreaped child to setpgid/getpgid (ESRCH), and on a
+     * loaded machine a short command (`git config`) gets there before the
+     * parent does. Its group was set before exec, by the spawn attributes or by
+     * the child itself; the parent waits until it is reapable, and the
      * supervision below reaps it with its real exit status. */
-    bool contained = setpgid(pid, pid) == 0;
+    bool observe_exiting = false;
+#ifdef CBM_ENABLE_TEST_SEAMS
+    if (g_observe_exiting > 0) {
+        g_observe_exiting--;
+        observe_exiting = true;
+    }
+#endif
+    bool contained = !observe_exiting && setpgid(pid, pid) == 0;
+    if (observe_exiting) {
+        errno = ESRCH;
+    }
     if (!contained && (errno == EACCES || errno == EPERM || errno == ESRCH)) {
-        contained = getpgid(pid) == pid || cbm_posix_child_exited(pid);
+        bool missing = errno == ESRCH;
+        contained = !observe_exiting && getpgid(pid) == pid;
+        if (!contained && (missing || errno == ESRCH)) {
+            contained = cbm_posix_child_reapable(pid);
+        }
     }
     if (!contained) {
         (void)kill(pid, SIGKILL);

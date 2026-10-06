@@ -211,6 +211,10 @@ int cbm_subprocess_pending_spawn_eagain_for_testing(void);
  * machine produces when a short command finishes before the parent runs
  * again. Test builds only. */
 void cbm_subprocess_hold_parent_until_child_exits_for_testing(int spawns);
+/* For the next N POSIX spawns, the parent's group check observes what macOS
+ * shows for a child that is EXITING: setpgid and getpgid answer ESRCH while
+ * waitid does not report it yet. Test builds only. */
+void cbm_subprocess_observe_exiting_child_for_testing(int spawns);
 #endif
 
 /* How the POSIX fork+exec child closed its inherited descriptors (#1484). */

@@ -155,6 +155,23 @@ TEST(subprocess_run_child_exited_before_group_check) {
 #endif
 }
 
+/* The window before that: macOS answers ESRCH for a child that has started
+ * exiting, before waitid can report it. A non-blocking "has it exited?"
+ * probe said no there, and macos-15-intel CI read a short `git config` as
+ * SPAWN_FAILED errno 3. The seam makes the parent observe exactly that. */
+TEST(subprocess_run_child_exiting_at_group_check) {
+#ifdef _WIN32
+    SKIP_PLATFORM("POSIX process groups");
+#else
+    cbm_subprocess_observe_exiting_child_for_testing(1);
+    cbm_proc_result_t r = run_sh("exit 3", 0);
+    cbm_subprocess_observe_exiting_child_for_testing(0);
+    ASSERT_EQ(r.outcome, CBM_PROC_EXIT_NONZERO);
+    ASSERT_EQ(r.exit_code, 3);
+    PASS();
+#endif
+}
+
 /* Daemon background helpers intentionally invoke fixed tool names such as
  * `curl` and `git`. A shell-free spawn must still perform the normal PATH
  * lookup for a name without a directory separator; exact binary paths keep
@@ -2346,6 +2363,7 @@ SUITE(subprocess) {
     RUN_TEST(subprocess_run_clean);
     RUN_TEST(subprocess_run_exit_nonzero);
     RUN_TEST(subprocess_run_child_exited_before_group_check);
+    RUN_TEST(subprocess_run_child_exiting_at_group_check);
     RUN_TEST(subprocess_run_resolves_literal_binary_name_from_path);
     RUN_TEST(subprocess_run_crash_is_crash);
     RUN_TEST(subprocess_run_hang_is_hang);
