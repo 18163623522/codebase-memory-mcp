@@ -223,6 +223,31 @@ static bool pt_windows_acl(pt_fixture *fx, const char *path, bool extra) {
                             &descriptor);
 }
 
+/* The encoding Windows stores for an inheritable generic grant: an effective
+ * full-access entry for the owner plus an inherit-only one, here naming
+ * `inherited` (the owner, or another principal for the negative). */
+static bool pt_windows_split_acl(pt_fixture *fx, const char *path, PSID inherited) {
+    PSID owner = pt_current_sid(fx);
+    wchar_t wide[PT_PATH];
+    unsigned char acl_bytes[1024];
+    ACL *acl = (ACL *)acl_bytes;
+    SECURITY_DESCRIPTOR descriptor;
+    return owner && inherited && pt_wide(path, wide) &&
+           InitializeAcl(acl, sizeof(acl_bytes), ACL_REVISION) &&
+           AddAccessAllowedAceEx(acl, ACL_REVISION, 0, FILE_ALL_ACCESS, owner) &&
+           AddAccessAllowedAceEx(acl, ACL_REVISION,
+                                 OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE,
+                                 FILE_ALL_ACCESS, inherited) &&
+           InitializeSecurityDescriptor(&descriptor, SECURITY_DESCRIPTOR_REVISION) &&
+           SetSecurityDescriptorOwner(&descriptor, owner, FALSE) &&
+           SetSecurityDescriptorDacl(&descriptor, TRUE, acl, FALSE) &&
+           SetSecurityDescriptorControl(&descriptor, SE_DACL_PROTECTED, SE_DACL_PROTECTED) &&
+           SetFileSecurityW(wide,
+                            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION |
+                                PROTECTED_DACL_SECURITY_INFORMATION,
+                            &descriptor);
+}
+
 static bool pt_owner_is_current(PSID owner) {
     HANDLE token = NULL;
     union {
@@ -1771,6 +1796,45 @@ done:
     return pt_finish(&fx, result);
 }
 
+/* The work parent production makes is owner-only: cbm_mkdir_p stamps a fresh
+ * directory with one inheritable grant for the owner, which Windows stores as
+ * an effective entry plus an inherit-only one. The policy refused that form,
+ * so the engine on Windows ran everything (pinning HEAD failed). The same
+ * split naming another principal is still refused. */
+TEST(tree_e_windows_split_owner_dacl_is_owner_only) {
+#ifndef _WIN32
+    SKIP_PLATFORM("Win32 DACL encoding");
+#else
+    pt_fixture fx = {0};
+    int result = 1;
+    char stamped[PT_PATH] = {0};
+    unsigned char world[SECURITY_MAX_SID_SIZE];
+    DWORD world_length = sizeof(world);
+    PT_CHECK(pt_setup_step("setup:init", pt_init(&fx, 40)) &&
+             pt_setup_step("setup:populate", pt_populate(&fx)) &&
+             pt_setup_step("setup:facts", pt_open_facts(&fx)) &&
+             pt_setup_step("setup:control", pt_fact_control(&fx)));
+    PT_CHECK(pt_join(stamped, fx.home, "stamped-parent") && cbm_mkdir_p(stamped, 0700));
+    cbm_pinned_tree_options_t options = pt_options(&fx, CBM_GIT_REV_HEAD);
+    options.private_parent = stamped;
+    cbm_pinned_tree_error_t error;
+    PT_CHECK(cbm_pinned_tree_create(&options, &fx.tree, &error) == CBM_PINNED_TREE_OK);
+    PT_CHECK(pt_close_one(&fx.tree));
+    PT_CHECK(pt_windows_split_acl(&fx, stamped, pt_current_sid(&fx)));
+    PT_CHECK(cbm_pinned_tree_create(&options, &fx.tree, &error) == CBM_PINNED_TREE_OK);
+    PT_CHECK(pt_close_one(&fx.tree));
+    PT_CHECK(CreateWellKnownSid(WinWorldSid, NULL, world, &world_length));
+    PT_CHECK(pt_windows_split_acl(&fx, stamped, world));
+    PT_CHECK(cbm_pinned_tree_create(&options, &fx.tree, &error) == CBM_PINNED_TREE_UNSUPPORTED &&
+             !fx.tree);
+    result = 0;
+done:
+    if (stamped[0] && !pt_windows_split_acl(&fx, stamped, pt_current_sid(&fx)))
+        result = 1;
+    return pt_finish(&fx, result);
+#endif
+}
+
 typedef struct {
     size_t calls, stop;
 } pt_cancel;
@@ -2536,6 +2600,7 @@ SUITE(test_impact_tree) {
     RUN_TEST(tree_c_complete_inventory_and_native_names);
     RUN_TEST(tree_d_native_collision_and_exact_spelling);
     RUN_TEST(tree_e_native_permissions_and_acl_policy);
+    RUN_TEST(tree_e_windows_split_owner_dacl_is_owner_only);
     RUN_TEST(tree_f_resource_limits_and_local_control);
     RUN_TEST(tree_g_verify_state_and_complete_inventory);
     RUN_TEST(tree_h_cleanup_owner_and_unrelated_resources);

@@ -59,6 +59,33 @@ bool tpt_win_security(tpt_context *c) {
     return true;
 }
 
+/* One DACL entry of the owner-only policy: an allow entry for the current
+ * user with full access and no flag but inheritance; 1 yes, 0 no, -1 broken. */
+static int tpt_owner_ace(PACL dacl, DWORD index, PSID sid, bool *effective) {
+    void *raw = NULL;
+    if (!GetAce(dacl, index, &raw))
+        return -1;
+    ACCESS_ALLOWED_ACE *ace = raw;
+    if (ace->Header.AceType != ACCESS_ALLOWED_ACE_TYPE)
+        return 0;
+    size_t prefix = offsetof(ACCESS_ALLOWED_ACE, SidStart);
+    if (ace->Header.AceSize < prefix + 8)
+        return -1;
+    BYTE inherit = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE;
+    if ((ace->Header.AceFlags & ~inherit) ||
+        (ace->Mask != FILE_ALL_ACCESS && ace->Mask != GENERIC_ALL))
+        return 0;
+    const SID *principal = (const SID *)&ace->SidStart;
+    size_t sid_size = 8 + (size_t)principal->SubAuthorityCount * sizeof(DWORD);
+    if (sid_size > ace->Header.AceSize - prefix || !IsValidSid(&ace->SidStart))
+        return -1;
+    if (!EqualSid(&ace->SidStart, sid))
+        return 0;
+    if (!(ace->Header.AceFlags & INHERIT_ONLY_ACE))
+        *effective = true;
+    return 1;
+}
+
 static int tpt_owner_acl(cbm_pinned_tree_t *t, PSECURITY_DESCRIPTOR sd) {
     PSID owner = NULL;
     PACL dacl = NULL;
@@ -80,25 +107,19 @@ static int tpt_owner_acl(cbm_pinned_tree_t *t, PSECURITY_DESCRIPTOR sd) {
     ACL_SIZE_INFORMATION info;
     if (!GetAclInformation(dacl, &info, sizeof(info), AclSizeInformation))
         return -1;
-    if (info.AceCount != 1)
+    /* Windows stores one inheritable full-access grant either as a single
+     * OI|CI entry or, when it was written with generic rights (cbm_mkdir_p's
+     * owner stamp), as an effective entry plus an inherit-only one. Both are
+     * the owner-only policy; at least one entry must apply to the object. */
+    if (info.AceCount < 1 || info.AceCount > 2)
         return 0;
-    void *raw = NULL;
-    if (!GetAce(dacl, 0, &raw))
-        return -1;
-    ACCESS_ALLOWED_ACE *ace = raw;
-    if (ace->Header.AceType != ACCESS_ALLOWED_ACE_TYPE)
-        return 0;
-    size_t prefix = offsetof(ACCESS_ALLOWED_ACE, SidStart);
-    if (ace->Header.AceSize < prefix + 8)
-        return -1;
-    if ((ace->Header.AceFlags & ~(OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE)) ||
-        (ace->Mask != FILE_ALL_ACCESS && ace->Mask != GENERIC_ALL))
-        return 0;
-    const SID *principal = (const SID *)&ace->SidStart;
-    size_t sid_size = 8 + (size_t)principal->SubAuthorityCount * sizeof(DWORD);
-    if (sid_size > ace->Header.AceSize - prefix || !IsValidSid(&ace->SidStart))
-        return -1;
-    return EqualSid(&ace->SidStart, sid) ? 1 : 0;
+    bool effective = false;
+    for (DWORD i = 0; i < info.AceCount; i++) {
+        int allowed = tpt_owner_ace(dacl, i, sid, &effective);
+        if (allowed != 1)
+            return allowed;
+    }
+    return effective ? 1 : 0;
 }
 
 bool tpt_native_acl(tpt_context *c, tpt_object *o, unsigned mode, bool changed) {
